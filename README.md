@@ -2,7 +2,9 @@
 
 把 Claude 和 GPT 当成两个独立的投资经理：给它们**字节一致**的市场证据包，让它们各自管理一个独立的 Alpaca **Paper** 账户，并把每一次决策的论点、引用证据、失效条件和预计持有期完整存档。
 
-**这是研究与观察系统，不是交易系统。** 代码里不存在提交、撤销、修改或平仓订单的任何路径。生成买入建议不会改变任何账户持仓。两套系统的盈利能力**尚未经过验证**，任何收益结论都需要真实时间推进后才能谈。
+**只对 Alpaca Paper 账户下单，不涉及真实资金。** 两套系统的盈利能力**尚未经过验证**，任何收益结论都需要真实时间推进后才能谈。
+
+研究层**没有下单路径**，这条没有被删除，只是被挪了位置：模型永远不写订单、数量或价格，它只输出目标权重；权重先通过确定性校验，然后由 `execution.py` 对着券商实际回报的持仓算差额并下单。账本是券商的成交，不是模型的文字。执行是**独立模块、必须显式调用**，默认 dry run，`POST /v2/orders` 是唯一的写接口 —— 没有撤单、没有改单、没有平仓接口，退出就是卖到零。
 
 灵感来自 [Rallies Arena](https://rallies.ai/arena) 的"实时证据 + AI 投资判断 + 持续复核"思路。**本项目不是 Rallies 的复刻**：它们的提示词、调度频率、工具链和风控约束没有公开到可复制的程度，本仓库里所有股票池、权重上限、调用频率都是我们自己的实验设定（assumption），不是已被证明最优的参数。
 
@@ -29,6 +31,7 @@
 | `ai_portfolios/models.py` | 固定研究指令、输出 schema、模型调用、以及全部确定性校验 |
 | `ai_portfolios/prompt_bench.py` | 冻结数据包上的离线 prompt 回归台，含提示注入金丝雀 |
 | `ai_portfolios/paper_accounts.py` | 只读 Alpaca Paper 账户；模型与账户 ID 的绑定一经确立就固定 |
+| `ai_portfolios/execution.py` | 唯一写券商的模块：目标权重 → 差额 → Paper 限价委托。默认 dry run |
 | `ai_portfolios/console_store.py` | 本机控制台编排：不可改写的轮次档案，完整 prompt / 回复留存 |
 | `ai_portfolios/console_server.py` | 本机面板服务（默认 `http://127.0.0.1:8789/`） |
 | `ai_portfolios/book.py` / `run.py` / `dashboard.py` | 早期本地模拟记账实验，保留作为历史，不与 Paper 账户结果混算 |
@@ -64,6 +67,19 @@ Copy-Item paper-accounts.env.example "$env:USERPROFILE\ai-arena-secrets\paper-ac
 浏览器打开 `http://127.0.0.1:8789/`：分别填写两个模型的委托书、启动研究、查看本轮实际发送的完整正文、原始回复、通过校验的建议，以及两个 Paper 账户的真实持仓与委托记录。
 
 不要把这个本机面板公开到互联网。不要同时启动两份服务写同一个数据目录。
+
+### 提交委托（Paper）
+
+```powershell
+.\.venv\Scripts\python.exe -m ai_portfolios.execution --provider claude
+.\.venv\Scripts\python.exe -m ai_portfolios.execution --provider claude --submit
+```
+
+第一条是 dry run：打印它会发什么，不碰券商。确认无误后加 `--submit`。
+
+执行层的硬性拒绝条件：决定未通过校验、账户身份与绑定不符、不在常规交易时段、报价无效或过期超过 120 秒、现价与冻结收盘价相差超过 20%、账户非 ACTIVE、存在空头持仓、目标越过任一限额、缺少必需报价。任一条命中就**整份拒绝**，不执行其中一部分。
+
+`client_order_id` 由（轮次, 模型, 标的, 方向）决定，所以同一份计划重复跑也只会下一次单 —— 券商会拒绝重复 id，程序把它记为 `duplicate_ignored` 而不是失败。卖出（降风险）即使在现金不够买入时也会提交；买入现金不足则**推迟并记录，绝不缩小权重替模型做决定**。
 
 ### prompt 回归（改 prompt 之前先跑这个）
 
