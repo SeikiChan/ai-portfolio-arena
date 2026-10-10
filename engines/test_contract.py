@@ -125,19 +125,36 @@ def test_bad_engine_id_cannot_address_a_result_root(engine_id):
         contract.result_root(engine_id)
 
 
-def test_export_carries_no_account_money(tmp_path, monkeypatch):
+def test_export_publishes_one_entry_per_model(tmp_path, monkeypatch):
     directory = round_dir(tmp_path)
     monkeypatch.setattr(contract, "result_root", lambda engine_id: directory.parent)
     export = publish.build()
     assert export["schema_version"] == 1 and export["team_id"] == "claude-independent"
-    assert export["status"] == "available" and len(export["rounds"]) == 1
+    assert export["status"] == "available" and export["execution_mode"] == "read_only_research"
+    # The shared viewer renders one round entry per model, so a two-model round publishes two.
+    assert [row["provider"] for row in export["rounds"]] == ["claude", "gpt"]
+    assert [row["id"] for row in export["rounds"]] == [f"{directory.name}:claude", f"{directory.name}:gpt"]
+    for row in export["rounds"]:
+        for field in ("id", "completed_at", "status", "user_prompt", "full_prompt"):
+            assert field in row
+
+
+def test_export_carries_no_account_money(tmp_path, monkeypatch):
+    directory = round_dir(tmp_path)
+    (directory / "claude_prompt.txt").write_text(
+        "RULES stay." + chr(10) + "INPUT:" + chr(10) + '{"alpaca_paper_portfolio": {"cash": 10000.0}}', encoding="utf-8")
+    monkeypatch.setattr(contract, "result_root", lambda engine_id: directory.parent)
+    export = publish.build()
+    entry = export["rounds"][0]
+    assert "RULES stay." in entry["full_prompt"] and "10000" not in entry["full_prompt"]
+    assert entry["full_prompt_sha256"] and entry["full_prompt_chars"] > 0
     assert export["orders_submitted"] is False
     body = __import__("json").dumps(export, ensure_ascii=False)
     # Account keys, not the substrings: `cash_reason` is the model's prose about holding cash and belongs here.
     for forbidden in ("cash", "equity", "last_equity", "account_number", "account_suffix", "avg_entry_price",
                       "market_value", "unrealized_pl", "holdings", "qty", "filled_avg_price"):
         assert f'"{forbidden}":' not in body
-    position = export["rounds"][0]["models"][0]["positions"][0]
+    position = export["rounds"][0]["positions"][0]
     assert set(position) == set(publish.POSITION_FIELDS)
 
 
@@ -146,6 +163,7 @@ def test_invalid_round_is_reported_not_dropped(tmp_path, monkeypatch):
     monkeypatch.setattr(contract, "result_root", lambda engine_id: directory.parent)
     export = publish.build()
     assert export["rounds"] == [] and export["status"] == "unavailable"
+    assert export["branch"] and export["workspace"]
     assert export["rejected_rounds"][0]["round_id"] == directory.name
     assert "orders_submitted" in export["rejected_rounds"][0]["reason"]
 
