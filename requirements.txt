@@ -1,0 +1,4 @@
+requests>=2.31
+# Windows has no system tz database; zoneinfo("America/New_York") needs this for the session check.
+tzdata>=2024.1
+pytest>=8.0

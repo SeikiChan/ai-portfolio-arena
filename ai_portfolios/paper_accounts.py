@@ -1,0 +1,143 @@
+"""GET-only adapter for two distinct Alpaca Paper accounts. No order mutations."""
+from __future__ import annotations
+
+import re
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import requests
+
+from .common import APP, ROOT, digest, finite, external_reference, stamp, write
+
+BASE = "https://paper-api.alpaca.markets"
+PREFIX = {"claude": "Claude", "gpt": "Gpt"}
+ENDPOINTS = {
+    "account": ("/v2/account", {}),
+    "positions": ("/v2/positions", {}),
+    "orders": ("/v2/orders", {"status": "all", "limit": 100, "direction": "desc", "nested": "true"}),
+}
+
+
+def load_credentials(path=None):
+    path = Path(path or ROOT / ".env.aitrading")
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except FileNotFoundError as exc:
+        raise ValueError("未找到 .env.aitrading") from exc
+    values = {}
+    for line in lines:
+        match = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$", line)
+        if match:
+            if match[1] in values:
+                raise ValueError("账户配置存在重复变量名")
+            values[match[1]] = match[2].strip("\"'")
+    result = {}
+    for name, prefix in PREFIX.items():
+        key = values.get(prefix + "APCA_API_KEY_ID")
+        secret = values.get(prefix + "APCA_API_SECRET_KEY")
+        if not key or not secret:
+            raise ValueError(f"{name} 的 Paper 凭据尚未完整配置")
+        result[name] = (key, secret)
+    if result["claude"][0] == result["gpt"][0]:
+        raise ValueError("两个模型使用了相同 API Key，请配置不同 Paper 账户")
+    return result
+
+
+def read_one(name, credentials, directory, getter=None):
+    getter = getter or requests.get
+    key, secret = credentials
+    result = {"provider": name, "environment": "alpaca_paper", "status": "connected", "fetched_at": stamp(), "errors": [], "records": []}
+    for kind, (path, params) in ENDPOINTS.items():
+        try:
+            response = getter(BASE + path, headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}, params=params, timeout=20, allow_redirects=False)
+            if response.status_code != 200:
+                result["errors"].append({"source": kind, "error": f"Alpaca Paper HTTP {response.status_code}"})
+                continue
+            payload = response.json()
+            if (kind == "account" and (not isinstance(payload, dict) or not payload.get("id"))) or (kind != "account" and not isinstance(payload, list)):
+                raise ValueError("Unexpected response shape")
+            file = directory / (name + "_" + kind + ".json")
+            write(file, payload, exclusive=True)
+            result[kind] = payload
+            result["records"].append({"file": file.name, "source": "GET " + BASE + path, "query": params,
+                                       "rows": len(payload) if isinstance(payload, list) else 1, "sha256": digest(file), "classification": "observed"})
+        except (requests.RequestException, ValueError) as exc:
+            result["errors"].append({"source": kind, "error": type(exc).__name__})
+    if "account" not in result:
+        result["status"] = "unavailable"
+    elif result["errors"]:
+        result["status"] = "partial"
+    result["fetched_at"] = stamp()
+    return result
+
+
+def verify_bindings(accounts, pinned=None):
+    pinned = pinned or {}
+    identities = {name: item.get("account", {}).get("id") for name, item in accounts.items()}
+    present = [value for value in identities.values() if value]
+    if len(present) != len(set(present)):
+        raise ValueError("两个模型连接到同一个 Paper 账户，已拒绝绑定")
+    for name, expected in pinned.items():
+        if identities.get(name) and identities[name] != expected:
+            raise ValueError(f"{name} 的 Paper 账户身份改变，需另建实验；禁止沿用旧记录")
+    return {**pinned, **{k: v for k, v in identities.items() if v}}
+
+
+def capture(directory, pinned=None, credentials=None):
+    credentials = credentials or load_credentials()
+    directory.mkdir(parents=True, exist_ok=False)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {name: pool.submit(read_one, name, credentials[name], directory) for name in PREFIX}
+        accounts = {name: task.result() for name, task in futures.items()}
+    bindings = verify_bindings(accounts, pinned)
+    snapshot = {"snapshot_id": directory.name, "fetched_at": stamp(), "accounts": accounts,
+                "classification": "observed: Alpaca Paper simulation account, not live money", "orders_submitted": False,
+                "truth_reference": external_reference(), "source_code": {str(p.relative_to(APP)): digest(p) for p in APP.rglob('*') if p.is_file() and p.suffix in {'.py','.js','.css','.html'}}}
+    write(directory / "snapshot.json", snapshot, exclusive=True)
+    return snapshot, bindings
+
+
+def number(value):
+    try:
+        number = float(value)
+        return number if finite(number) else None
+    except (ValueError, TypeError):
+        return None
+
+
+def public_account(item):
+    account = item.get("account", {})
+    result = {"provider": item["provider"], "environment": "alpaca_paper", "status": item["status"],
+              "fetched_at": item["fetched_at"], "errors": item["errors"],
+              "account_suffix": str(account.get("account_number", account.get("id", "")))[-4:],
+              "account_status": account.get("status"), "currency": account.get("currency"),
+              "equity": number(account.get("equity")), "cash": number(account.get("cash")),
+              "buying_power": number(account.get("buying_power")), "last_equity": number(account.get("last_equity")),
+              "positions": None, "orders": None, "orders_scope": "最近最多 100 笔委托，不代表完整成交历史"}
+    if "positions" in item:
+        fields = ("symbol", "qty", "side", "avg_entry_price", "current_price", "market_value", "unrealized_pl", "unrealized_plpc")
+        result["positions"] = [{k: p.get(k) for k in fields} for p in item["positions"]]
+    if "orders" in item:
+        fields = ("id", "client_order_id", "symbol", "side", "type", "qty", "notional", "status", "filled_qty", "filled_avg_price", "submitted_at", "filled_at")
+        result["orders"] = [{k: p.get(k) for k in fields} for p in item["orders"]]
+    return result
+
+
+def model_portfolio(item, last_decision):
+    if item["status"] != "connected":
+        raise ValueError("Paper 账户快照不完整，无法生成可靠研究输入")
+    account = item["account"]
+    if account.get("status") != "ACTIVE":
+        raise ValueError("Paper 账户不是 ACTIVE")
+    cash = number(account.get("cash"))
+    if cash is None or cash < 0:
+        raise ValueError("账户现金无效或涉及融资，当前只支持现金做多研究")
+    holdings = {}
+    for position in item["positions"]:
+        shares = number(position.get("qty"))
+        price = number(position.get("current_price"))
+        if shares is None or shares < 0 or price is None or price <= 0:
+            raise ValueError("当前持仓不符合现金做多研究要求")
+        if shares:
+            holdings[position["symbol"]] = {"shares": shares, "last_mark": price}
+    return {"cash": cash, "holdings": holdings, "last_decision": last_decision}

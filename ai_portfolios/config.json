@@ -1,0 +1,22 @@
+{
+  "version": "1.0",
+  "experiment": "Claude / GPT independent forward shadow portfolios",
+  "initial_cash": 100000.0,
+  "universe": ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "AVGO", "AMD", "MU", "AMAT", "JPM", "V", "XOM", "CAT", "UNH", "COST", "WMT", "LLY", "CRM", "PLTR"],
+  "benchmarks": ["SPY", "QQQ"],
+  "max_positions": 10,
+  "max_weight": 0.2,
+  "max_invested": 0.95,
+  "quote_feed": "iex",
+  "max_quote_age_seconds": 90,
+  "minimum_execution_delay_seconds": 60,
+  "plan_lifetime_hours": 24,
+  "model_timeout_seconds": 600,
+  "claude_model": "sonnet",
+  "gpt_model": "gpt-6-astra",
+  "news_days": 7,
+  "news_per_symbol": 3,
+  "stress_cost_bps_per_side": 5,
+  "external_truth_ledger": null,
+  "rules_classification": "assumption: experiment rules chosen by us; not Rallies original rules"
+}

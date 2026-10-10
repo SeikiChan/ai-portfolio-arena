@@ -1,0 +1,15 @@
+# Credentials: never commit. Alpaca market-data keys and the two Paper account keys.
+.env
+.env.*
+!.env.example
+!.env.aitrading.example
+
+# Local research output: account snapshots, broker records, saved prompts and model responses.
+/reports/
+/logs/
+
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.tmp
