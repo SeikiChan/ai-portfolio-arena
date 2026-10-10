@@ -22,7 +22,8 @@ from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 
-from .common import APP, digest, env_values, now, parse_time, read, stamp, write
+from .common import APP, digest, now, parse_time, read, stamp, write
+from .credentials import fingerprint, market_data_keys
 from .data import collect
 
 STORE = Path(os.environ.get("AI_ARENA_PACKET_STORE") or Path.home() / "ai-arena-packets")
@@ -94,10 +95,13 @@ def freeze(config, keys=None, store=None, collector="unknown"):
         packet_id = now().strftime("%Y%m%dT%H%M%S%fZ")
         directory = rounds_root(store) / packet_id
         directory.mkdir(parents=True, exist_ok=False)
-        collect(directory, config, keys=keys if keys is not None else env_values())
+        resolved = keys if keys is not None else market_data_keys()
+        collect(directory, config, keys=resolved)
         pointer = {"packet_id": packet_id, "frozen_at": read(directory / "packet.json")["frozen_at"],
                    "packet_sha256": digest(directory / "packet.json"), "collector": collector,
                    "lifetime_hours": LIFETIME_HOURS, "created_at": stamp(),
+                   # Fingerprint, never the key: proves both teams would read the same source.
+                   "market_data_key_fingerprint": fingerprint(resolved.get("APCA_API_KEY_ID")),
                    "source_code": {p.name: digest(p) for p in APP.glob("*.py")},
                    "classification": {"market_data": "observed", "price_features": "derived"}}
         write(directory / "store_manifest.json", pointer, exclusive=True)

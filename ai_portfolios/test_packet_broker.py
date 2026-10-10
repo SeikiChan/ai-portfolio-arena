@@ -18,7 +18,7 @@ def fake_collect(directory, config, keys=None):
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     monkeypatch.setattr(packet_broker, "collect", fake_collect)
-    monkeypatch.setattr(packet_broker, "env_values", lambda: {})
+    monkeypatch.setattr(packet_broker, "market_data_keys", lambda: {})
     return tmp_path / "store"
 
 

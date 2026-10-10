@@ -7,7 +7,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from .common import APP, DATA, ROOT, digest, env_values, external_reference, now, read, stamp, write
+from .common import APP, DATA, ROOT, digest, external_reference, now, read, stamp, write
 from . import packet_broker
 from .models import INSTRUCTION_VERSION, REASONING_EFFORT, research_instruction, run_model, text_digest
 from .paper_accounts import capture, load_credentials, model_portfolio, public_account
@@ -127,13 +127,13 @@ class ConsoleStore:
             snapshot, credentials = self._capture()
             write(directory / "accounts_before.json", snapshot, exclusive=True)
             # Shared market feed, dedicated account state. Keys never enter model context.
-            keys = env_values()
-            keys["APCA_API_KEY_ID"], keys["APCA_API_SECRET_KEY"] = credentials["gpt"]
+            # The market-data pair is a neutral third Paper key, not either team's account: the shared
+            # packet must come from one source, and the collector must not be one of the contestants.
             job["stage"] = "领取共同冻结证据包"
             self._progress(directory, job)
             # One freeze per round, read by every team. Never collect here: a round that collected its
             # own evidence cannot be paired with another team's round on the same market state.
-            pointer = packet_broker.claim(self.config, directory, job.get("packet_id"), keys=keys,
+            pointer = packet_broker.claim(self.config, directory, job.get("packet_id"),
                                           collector="paper_console")
             packet = read(directory / "packet.json")
             job["packet_id"] = pointer["packet_id"]

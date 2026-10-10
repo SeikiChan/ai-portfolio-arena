@@ -41,11 +41,19 @@
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-Copy-Item .env.example .env
-Copy-Item .env.aitrading.example .env.aitrading
+New-Item -ItemType Directory -Force "$env:USERPROFILE\ai-arena-secrets" | Out-Null
+Copy-Item market-data.env.example "$env:USERPROFILE\ai-arena-secrets\market-data.env"
+Copy-Item paper-accounts.env.example "$env:USERPROFILE\ai-arena-secrets\paper-accounts.env"
 ```
 
-把 `.env`（Alpaca 行情 + FMP）和 `.env.aitrading`（两个独立的 Paper 账户密钥）填好。两个文件都在 `.gitignore` 里，不要提交，也不要粘进任何报告或聊天。
+凭据放在**仓库之外的共享目录** `%USERPROFILE%\ai-arena-secrets\`（可用 `AI_ARENA_SECRETS` 覆盖），所有团队读同一份，轮换只改一处：
+
+- `market-data.env` — Alpaca 行情 + FMP。仅用于 GET 市场数据端点。应当是一个**独立的第三个** Paper key pair，不是任何一方的账户 key，这样采集方不是参赛方之一。
+- `paper-accounts.env` — 两个独立 Paper 账户，每个模型一个。每个团队只应读自己那一个：`load_credentials(only="gpt")`。
+
+解析顺序是进程环境变量 → 共享目录 → 工作区本地 `.env` / `.env.aitrading`（保留以便旧 checkout 仍能跑）。不要提交，也不要粘进任何报告或聊天。
+
+想确认两边用的是同一个行情来源而又不暴露 key，看 `credentials.audit()`：它只输出来源和指纹，secret 那一半连指纹都不给。
 
 ## 运行
 

@@ -95,11 +95,26 @@ python -m ai_portfolios.packet_broker claim --into <轮次目录>  # 领取并�
 
 `freeze` 持有 `freeze.lock`，所以两个进程同时冻结不会产生两份。谁冻结都行 —— Paper 面板跑一轮时会自动领取，没有有效包就顺手冻一份。
 
-## 六、一个需要确认的口径问题
+## 六、行情凭据也是共享的
 
-当前面板领取时传入的行情凭据，沿用的是**旧代码的行为：用 GPT Paper 账户的 APCA key 取市场数据**（`console_store._run` 里原本就这么写的，我没有静默改掉）。
+采集用的行情凭据从 `%USERPROFILE%\ai-arena-secrets\market-data.env` 读取，所有团队同一份。
+解析顺序：进程环境变量 → 共享目录 → 工作区本地文件（保留以便旧 checkout 仍能跑）。
 
-对一个本应中立的共享包，这个口径是别扭的 —— 更合适的是用共享 `.env` 里的行情凭据。但改动它会影响一条当前能跑通的路径，所以留作显式决定，不默认改。`store_manifest.json` 里的 `collector` 字段记录了实际由谁冻结。
+这一对 key 是**独立的第三个 Paper key pair**，既不是 Claude 账户也不是 GPT 账户，所以采集方不是参赛方之一。
+（旧代码会把它覆盖成 GPT 账户的 key，那个不对称没有任何理由，已经去掉。哪个 paper key 去请求不会改变返回的数据，
+但这件事得读代码才能发现，所以不该留着。）
+
+账户 key 在同目录的 `paper-accounts.env`。**每个团队只应读自己那一个**：
+
+```python
+load_credentials(only="gpt")      # 只解析 GPT 账户，另一个根本不读
+```
+
+两边可以在不暴露 key 的前提下验证用的是同一个来源：`store_manifest.json` 里有
+`market_data_key_fingerprint`（sha256 前 10 位），`python -m ai_portfolios.credentials` 式的
+`credentials.audit()` 会输出每个凭据的来源和指纹，**从不输出值**，secret 那一半连指纹都不给。
+
+两个文件都不要提交、不要粘进报告或聊天。轮换只需改共享目录这一处。
 
 ## 七、分类标注
 
