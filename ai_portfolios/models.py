@@ -114,12 +114,22 @@ Code validates your answer. No historical backtest, no real-money order, no guar
 """
 
 
+# Both CLIs ship inside their host application rather than on PATH, and which one is on PATH differs
+# between an interactive shell and a spawned process. Resolving them explicitly keeps a round from
+# failing as "executable unavailable" when the tool is in fact installed and logged in.
+FALLBACKS = {
+    "claude": (".vscode/extensions", "anthropic.claude-code-*/resources/native-binary/claude.exe"),
+    "codex": (".codex/plugins", ".plugin-appserver/codex.exe"),
+}
+
+
 def executable(name):
     found = shutil.which(name)
     if found:
         return found
-    if name == "claude":
-        candidates = sorted((Path.home() / ".vscode" / "extensions").glob("anthropic.claude-code-*/resources/native-binary/claude.exe"), key=lambda p: p.stat().st_mtime, reverse=True)
+    root, pattern = FALLBACKS.get(name, (None, None))
+    if root:
+        candidates = sorted((Path.home() / root).glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
         if candidates:
             return str(candidates[0])
     raise RuntimeError(f"{name} executable unavailable")
@@ -329,6 +339,43 @@ def parse_output(name, process, output_path, result):
     return json.loads(answer), answer
 
 
+def cli_errors(stdout):
+    """Error messages a CLI reported on stdout, whatever envelope it used."""
+    messages = []
+    try:
+        envelope = json.loads(stdout)
+        if isinstance(envelope, dict) and envelope.get("result"):
+            messages.append(str(envelope["result"]))
+    except ValueError:
+        pass
+    for line in stdout.splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict):
+            message = event.get("message") or (event.get("error") or {}).get("message") if isinstance(event.get("error"), dict) else event.get("message")
+            if message:
+                messages.append(str(message))
+    return messages
+
+
+def classify_failure(name, stdout, result):
+    """Separate "retry later" from "broken" so a scheduler cannot treat a quota pause as a defect."""
+    text = " ".join(cli_errors(stdout)).lower()
+    if "authenticate" in text or "oauth" in text or "log in" in text or "logged out" in text:
+        result["failure_kind"] = "authentication_required"
+        result["error_hint"] = f"{name} 登录已过期或未登录。请在对应 CLI 重新登录，然后单独补跑该模型。"
+    elif "usage limit" in text or "rate limit" in text or "quota" in text or "purchase more credits" in text:
+        result["failure_kind"] = "usage_limit_reached"
+        result["error_hint"] = f"{name} 的用量额度已用完，这不是代码故障。等额度恢复后单独补跑该模型，不要用另一个模型的答案替代。"
+    else:
+        result["failure_kind"] = "cli_error"
+    return result
+
+
 def run_model(name, packet, previous, config, directory, user_prompt="", portfolio_mode="shadow"):
     prompt = build_prompt(packet, previous, config, user_prompt, portfolio_mode)
     (directory / f"{name}_prompt.txt").write_text(prompt, encoding="utf-8")
@@ -351,15 +398,9 @@ def run_model(name, packet, previous, config, directory, user_prompt="", portfol
             (directory / f"{name}_stderr.txt").write_text(process.stderr, encoding="utf-8")
             result["return_code"] = process.returncode
             if process.returncode:
-                if name == "claude":
-                    try:
-                        failure = json.loads(process.stdout).get("result", "")
-                    except ValueError:
-                        failure = ""
-                    if "authenticate" in failure.lower() or "oauth" in failure.lower():
-                        result["failure_kind"] = "authentication_required"
-                        raise RuntimeError("Claude 登录已过期，自动刷新失败。请在 Claude Code 重新登录，然后单独补跑 Claude。")
-                raise RuntimeError(f"{name} CLI failed; see saved {name}_stdout.txt and {name}_stderr.txt")
+                classify_failure(name, process.stdout, result)
+                raise RuntimeError(result.get("error_hint") or
+                                   f"{name} CLI failed; see saved {name}_stdout.txt and {name}_stderr.txt")
             decision, answer = parse_output(name, process, output, result)
             (directory / f"{name}_response.txt").write_text(answer, encoding="utf-8")
             result["decision"] = validate(decision, config, packet, previous)
