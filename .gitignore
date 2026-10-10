@@ -6,6 +6,7 @@
 
 # Local research output: account snapshots, broker records, saved prompts and model responses.
 /reports/
+/exports/
 /logs/
 
 __pycache__/

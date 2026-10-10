@@ -1,0 +1,155 @@
+from copy import deepcopy
+
+import pytest
+
+from ai_portfolios.common import digest, write
+from engines import contract, publish, registry
+
+PACKET = {"snapshot_id": "s1", "frozen_at": "2026-10-09T15:00:00+00:00", "features": [], "evidence": [], "errors": []}
+
+
+def round_dir(tmp_path, **overrides):
+    directory = tmp_path / "20261010T000000000000Z"
+    directory.mkdir()
+    write(directory / "packet.json", PACKET)
+    job = {"id": directory.name, "engine_id": "claude_engine", "engine_version": "2026-10-10.v2",
+           "engine_author": "Claude", "providers": ["claude", "gpt"], "environment": "alpaca_paper",
+           "packet_sha256": digest(directory / "packet.json"), "instruction_sha256": "a" * 64,
+           "mandate_sha256": {"claude": "b" * 64, "gpt": "b" * 64}, "strict_comparison": True,
+           "reasoning_effort": "medium", "orders_submitted": False, "status": "completed",
+           "started_at": "2026-10-10T00:00:00+00:00", "completed_at": "2026-10-10T00:05:00+00:00"}
+    job.update(overrides)
+    write(directory / "round.json", job)
+    write(directory / "receipt.json", {"round_id": directory.name, "orders_submitted": False})
+    for provider in job["providers"] if isinstance(job["providers"], list) else []:
+        (directory / f"{provider}_prompt.txt").write_text("prompt", encoding="utf-8")
+        write(directory / f"{provider}_status.json", {"provider": provider, "status": "validated",
+              "model_requested": "m", "decision": {"overview": "o", "cash_reason": "c", "evidence_gaps": [],
+              "macro_claims": [], "memory_claims": [], "injection_flags": [], "positions": [
+                  {"symbol": "MSFT", "action": "new", "target_weight": 0.1, "horizon_days": 60,
+                   "confidence": 0.6, "thesis": "t", "changes_vs_last": "c", "evidence_ids": [],
+                   "fact_refs": [], "evidence_quotes": [], "invalidation": {}}]}})
+    return directory
+
+
+def test_valid_round_passes_the_contract(tmp_path):
+    summary = contract.validate_round(round_dir(tmp_path))
+    assert summary["providers"] == ["claude", "gpt"] and summary["strict_comparison"] is True
+
+
+def test_claude_engine_conforms_to_the_interface():
+    details = contract.check_engine(registry.get("claude_engine"))
+    assert details["author"] == "Claude" and details["instruction_chars"] > 1000
+
+
+def test_codex_slot_is_declared_but_reported_unimplemented():
+    engines, problems = registry.loaded()
+    assert "codex_engine" in registry.declared()
+    assert "codex_engine" not in engines
+    assert "not implemented" in problems["codex_engine"]
+
+
+@pytest.mark.parametrize("value", [True, None, 0, "false"])
+def test_orders_submitted_must_be_exactly_false(tmp_path, value):
+    with pytest.raises(ValueError, match="orders_submitted"):
+        contract.validate_round(round_dir(tmp_path, orders_submitted=value))
+
+
+def test_packet_hash_mismatch_rejected(tmp_path):
+    with pytest.raises(ValueError, match="packet_sha256"):
+        contract.validate_round(round_dir(tmp_path, packet_sha256="c" * 64))
+
+
+def test_strict_round_cannot_have_differing_mandates(tmp_path):
+    with pytest.raises(ValueError, match="byte-identical"):
+        contract.validate_round(round_dir(tmp_path, mandate_sha256={"claude": "b" * 64, "gpt": "d" * 64}))
+
+
+def test_strict_round_cannot_be_a_single_provider(tmp_path):
+    with pytest.raises(ValueError, match="byte-identical"):
+        contract.validate_round(round_dir(tmp_path, providers=["claude"], mandate_sha256={"claude": "b" * 64}))
+
+
+def test_single_provider_round_is_allowed_when_not_called_strict(tmp_path):
+    summary = contract.validate_round(round_dir(tmp_path, providers=["claude"], strict_comparison=False,
+                                                mandate_sha256={"claude": "b" * 64}))
+    assert summary["providers"] == ["claude"] and summary["strict_comparison"] is False
+
+
+@pytest.mark.parametrize("field", sorted(contract.ROUND_REQUIRED))
+def test_every_required_field_is_actually_required(tmp_path, field):
+    directory = round_dir(tmp_path)
+    job = {k: v for k, v in __import__("json").loads((directory / "round.json").read_text(encoding="utf-8")).items() if k != field}
+    write(directory / "round.json", job)
+    with pytest.raises(ValueError):
+        contract.validate_round(directory)
+
+
+@pytest.mark.parametrize("missing", ["packet.json", "receipt.json", "claude_prompt.txt", "gpt_status.json"])
+def test_missing_required_file_rejected(tmp_path, missing):
+    directory = round_dir(tmp_path)
+    (directory / missing).unlink()
+    with pytest.raises(ValueError):
+        contract.validate_round(directory)
+
+
+@pytest.mark.parametrize("providers", [[], ["claude", "claude"], ["claude", "grok"], "claude"])
+def test_bad_provider_list_rejected(tmp_path, providers):
+    mandates = {p: "b" * 64 for p in providers} if isinstance(providers, list) else {"claude": "b" * 64}
+    with pytest.raises(ValueError):
+        contract.validate_round(round_dir(tmp_path, providers=providers, mandate_sha256=mandates,
+                                          strict_comparison=False))
+
+
+def test_diagonal_only_design_is_flagged_as_inseparable():
+    diagonal = [{"engine_id": "claude_engine", "providers": ["claude"]},
+                {"engine_id": "codex_engine", "providers": ["gpt"]}]
+    report = contract.cell_coverage(diagonal)
+    assert report["separable"] is False
+    assert sorted(report["empty_cells"]) == ["claude_engine/gpt", "codex_engine/claude"]
+
+
+def test_full_design_is_separable():
+    full = [{"engine_id": "claude_engine", "providers": ["claude", "gpt"]},
+            {"engine_id": "codex_engine", "providers": ["claude", "gpt"]}]
+    assert contract.cell_coverage(full)["separable"] is True
+
+
+def test_single_engine_is_never_separable():
+    assert contract.cell_coverage([{"engine_id": "claude_engine", "providers": ["claude", "gpt"]}])["separable"] is False
+
+
+@pytest.mark.parametrize("engine_id", ["", "Claude", "claude-engine", "ab", "../etc", "a" * 40])
+def test_bad_engine_id_cannot_address_a_result_root(engine_id):
+    with pytest.raises(ValueError):
+        contract.result_root(engine_id)
+
+
+def test_export_carries_no_account_money(tmp_path, monkeypatch):
+    directory = round_dir(tmp_path)
+    monkeypatch.setattr(contract, "result_root", lambda engine_id: directory.parent)
+    export = publish.build()
+    assert export["schema_version"] == 1 and export["team_id"] == "claude-independent"
+    assert export["status"] == "available" and len(export["rounds"]) == 1
+    assert export["orders_submitted"] is False
+    body = __import__("json").dumps(export, ensure_ascii=False)
+    # Account keys, not the substrings: `cash_reason` is the model's prose about holding cash and belongs here.
+    for forbidden in ("cash", "equity", "last_equity", "account_number", "account_suffix", "avg_entry_price",
+                      "market_value", "unrealized_pl", "holdings", "qty", "filled_avg_price"):
+        assert f'"{forbidden}":' not in body
+    position = export["rounds"][0]["models"][0]["positions"][0]
+    assert set(position) == set(publish.POSITION_FIELDS)
+
+
+def test_invalid_round_is_reported_not_dropped(tmp_path, monkeypatch):
+    directory = round_dir(tmp_path, orders_submitted=True)
+    monkeypatch.setattr(contract, "result_root", lambda engine_id: directory.parent)
+    export = publish.build()
+    assert export["rounds"] == [] and export["status"] == "unavailable"
+    assert export["rejected_rounds"][0]["round_id"] == directory.name
+    assert "orders_submitted" in export["rejected_rounds"][0]["reason"]
+
+
+def test_engine_rejects_an_unknown_provider():
+    with pytest.raises(ValueError, match="both providers"):
+        registry.get("claude_engine").decide("grok", deepcopy(PACKET), {}, "", None, None)
