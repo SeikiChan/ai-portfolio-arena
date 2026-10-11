@@ -19,10 +19,19 @@ FLAT_ACTIONS = {"exit", "watch"}
 INVALIDATION_KINDS = {"price_below", "price_above", "news_event", "financial_event", "time"}
 PRICE_KINDS = {"price_below", "price_above"}
 FEATURE_KEYS = {"last_close", "return_5d", "return_20d", "return_60d", "mean_20d", "mean_60d"}
-# The packet carries no macro series at all: any use of these must be attributed to a news item.
-MACRO_TERMS = ("标普", "标准普尔", "纳斯达克", "道琼斯", "道指", "美债", "国债", "美联储", "联储",
-               "加息", "降息", "CPI", "通胀", "非农", "失业率", "美元指数", "VIX", "油价", "原油",
-               "十年期", "10年期")
+# The packet carries no macro series at all: any ASSERTION using these must be attributed to a news
+# item. Grouped, because a claim may legitimately say 原油 where the thesis said 油价 - matching the
+# literal term against the claim text rejected correctly-attributed answers.
+MACRO_GROUPS = (("标普", "标准普尔"), ("纳斯达克",), ("道琼斯", "道指"),
+                ("美债", "国债", "十年期", "10年期", "收益率"), ("美联储", "联储", "加息", "降息"),
+                ("CPI", "通胀"), ("非农", "失业率"), ("美元指数",), ("VIX",), ("油价", "原油"))
+MACRO_TERMS = tuple(term for group in MACRO_GROUPS for term in group)
+# A conditional is a sensitivity, not a claim about the world: "油价若回落" cites nothing because
+# there is nothing to cite. An assertion in the same sentence still needs its source.
+CONDITIONAL = ("若", "如果", "一旦", "假如", "倘若", "万一")
+# Tight on purpose: a Chinese conditional marker hugs its term (若油价回落 / 油价若回落).
+# A wide window let a conditional later in the sentence shield an assertion earlier in it.
+CONDITIONAL_BEFORE, CONDITIONAL_AFTER = 6, 3
 
 QUOTE = {"type": "object", "additionalProperties": False, "properties": {
     "evidence_id": {"type": "string"}, "quote": {"type": "string"}},
@@ -88,13 +97,19 @@ including raw digits. A rephrased or unit-converted number is not a quote and wi
 Every evidence id used in fact_refs or evidence_quotes must also appear in that position's evidence_ids.
 Macro statements (index levels, yields, oil, rates, Fed, CPI) are NOT data in this packet. Any macro term you
 write in `overview`, a `thesis` or `changes_vs_last` must appear in a `macro_claims` entry with the news id
-and verbatim quote that reported it - otherwise do not write it at all.
+and verbatim quote that reported it - otherwise do not write it at all. This applies to a macro term used
+AGAINST your own position too: naming a risk is wanted, and it still has to be attributed, so attribute it
+rather than dropping the risk to stay inside the rule.
 Never state a valuation ratio, fair value, price target, earnings date, hit rate or profit forecast.
 
 PORTFOLIO
-Long-only US equities from INPUT.limits.universe. No leverage, options or shorting. Cash is a decision, not a
-leftover. You are NOT required to trade. Output the COMPLETE desired portfolio, never increments. Include
-EVERY current holding. `action` is one of new / add / hold / trim / exit / watch; exit and watch require
+Long-only US equities from INPUT.limits.universe. No leverage, options or shorting. Output the COMPLETE
+desired portfolio, never increments. Include EVERY current holding.
+PARTICIPATION IS REQUIRED. INPUT.limits.min_invested is a floor, not a target: a book below it is rejected
+whole and that account does nothing that day. You are running a book, not reviewing one. "The evidence is
+thin" is a reason to size small and say so, not a reason to stand aside - standing aside is unavailable.
+Cash above the floor is a position like any other and needs a named condition you are waiting for, specific
+enough that a future packet can show whether it happened. `action` is one of new / add / hold / trim / exit / watch; exit and watch require
 target_weight 0, the other four require a positive weight.
 `horizon_days` (1-365) is the day by which you expect to either still hold the name or re-review it. It is an
 estimate, never a forced sale, and it is required for watch items too. Do not sell because a day passed.
@@ -103,8 +118,12 @@ valid and often correct answer; every weight change must name the new evidence t
 `invalidation` is the one thing that would tell you that you are wrong. kind is price_below / price_above /
 news_event / financial_event / time. For the two price kinds, `reference` is either a price level as a plain
 number or a price fact_ref; for the others it names the event you are watching for.
-`confidence` (0.05-0.95) is your probability that the invalidation does NOT trigger within horizon_days. It
-will be scored against what actually happens. Do not inflate it; 0.5 means you do not know.
+`confidence` (0.05-0.95) is your probability that the invalidation does NOT trigger within horizon_days.
+It is scored with a Brier score against what actually happened. Answering 0.5 everywhere guarantees a score
+of 0.25, which is exactly the score of someone holding no information at all; it is the one answer that can
+never be better than chance. Give 0.5 only where you truly have no view, and expect to be asked why you hold
+something you have no view on. Do not inflate it either: a confident number that keeps being wrong scores
+worse than 0.5.
 
 OUTPUT
 Return only the requested JSON. Write every prose field in Simplified Chinese.
@@ -199,6 +218,44 @@ def check_invalidation(rule, evidence, symbol):
         raise ValueError("Price invalidation level is implausible")
 
 
+def decision_prose(decision):
+    """The fields a decision is argued in. Gaps and invalidation text may name absent macro data."""
+    parts = [decision.get("overview", "")]
+    for position in decision.get("positions", []):
+        parts += [str(position.get("thesis", "")), str(position.get("changes_vs_last", ""))]
+    return parts
+
+
+def quality_flags(decision):
+    """Attributes worth recording that do not make a decision unusable.
+
+    An unattributed macro term used to be a rejection. It is now recorded instead, because the two
+    outcomes are not symmetric: an untraceable sentence in an archived thesis is visible and can be
+    read later, while a rejected round means the account does nothing that day and, running
+    unattended, nobody finds out why. Three of the rejections measured across thirty repeats were
+    this check firing on prose that had nothing to cite - a conditional, a synonym, and a company's
+    earnings driver. A fabricated quote still rejects: that one invalidates the reasoning itself.
+    """
+    claims = [c.get("claim", "") for c in decision.get("macro_claims", []) if isinstance(c, dict)]
+    prose = decision_prose(decision)
+    return {"unattributed_macro": sorted({group[0] for group in MACRO_GROUPS
+                                          if asserted(group, prose)
+                                          and not any(t in c for t in group for c in claims)})}
+
+
+def asserted(group, prose):
+    """True when a macro group is stated as fact somewhere, rather than only inside a conditional."""
+    for part in prose:
+        for term in group:
+            start = 0
+            while (index := part.find(term, start)) != -1:
+                window = part[max(0, index - CONDITIONAL_BEFORE):index + len(term) + CONDITIONAL_AFTER]
+                if not any(marker in window for marker in CONDITIONAL):
+                    return True
+                start = index + len(term)
+    return False
+
+
 def validate(decision, config, packet, previous):
     if not isinstance(decision, dict) or set(decision) != set(SCHEMA["required"]):
         raise ValueError("Invalid decision fields")
@@ -219,7 +276,8 @@ def validate(decision, config, packet, previous):
             raise ValueError("Invalid macro claim")
         check_quote({"evidence_id": row["evidence_id"], "quote": row["quote"]}, evidence, kinds={"news"})
         claims.append(row["claim"])
-    seen, total, count, prose = set(), 0.0, 0, [decision["overview"]]
+    prior = {p.get("symbol") for p in ((previous.get("last_decision") or {}).get("positions") or [])}
+    seen, total, count = set(), 0.0, 0
     for position in decision["positions"]:
         if not isinstance(position, dict) or set(position) != set(POSITION["required"]):
             raise ValueError("Invalid position fields")
@@ -234,10 +292,15 @@ def validate(decision, config, packet, previous):
             raise ValueError("Unknown action")
         if (position["action"] in FLAT_ACTIONS) != (weight == 0):
             raise ValueError("Action contradicts target weight")
-        for key in ("thesis", "changes_vs_last"):
-            if not isinstance(position[key], str) or len(position[key].strip()) < 8:
-                raise ValueError(f"Missing {key}")
-            prose.append(position[key])
+        if not isinstance(position["thesis"], str) or len(position["thesis"].strip()) < 8:
+            raise ValueError("Missing thesis")
+        changes = position["changes_vs_last"]
+        if not isinstance(changes, str) or not changes.strip():
+            raise ValueError("Missing changes_vs_last")
+        # Only a name that was in the last decision has something to compare against; for a brand new
+        # position "首次建仓" is complete information, and demanding more invites padding.
+        if symbol in prior and len(changes.strip()) < 8:
+            raise ValueError("Missing changes_vs_last")
         if type(position["horizon_days"]) is not int or not 1 <= position["horizon_days"] <= 365:
             raise ValueError("Invalid horizon")
         if not finite(position["confidence"]) or not 0.05 <= position["confidence"] <= 0.95:
@@ -276,10 +339,9 @@ def validate(decision, config, packet, previous):
         raise ValueError("Portfolio limit violation")
     if not set(previous["holdings"]).issubset(seen):
         raise ValueError("Existing holding omitted without an exit decision")
-    # Decision-driving prose only: evidence_gaps and invalidation descriptions may name absent macro data.
-    unattributed = [term for term in MACRO_TERMS if any(term in part for part in prose) and not any(term in c for c in claims)]
-    if unattributed:
-        raise ValueError("Unattributed macro statement: " + ",".join(unattributed))
+    floor = config.get("min_invested")
+    if floor and total < floor - 1e-9:
+        raise ValueError(f"Below the participation floor: {total:.0%} invested, {floor:.0%} required")
     return decision
 
 
@@ -406,6 +468,7 @@ def run_model(name, packet, previous, config, directory, user_prompt="", portfol
             decision, answer = parse_output(name, process, output, result)
             (directory / f"{name}_response.txt").write_text(answer, encoding="utf-8")
             result["decision"] = validate(decision, config, packet, previous)
+            result["quality_flags"] = quality_flags(result["decision"])
             result["status"] = "validated"
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, RuntimeError) as exc:
         result["status"] = "failed"
