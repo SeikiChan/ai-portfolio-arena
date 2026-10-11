@@ -14,7 +14,7 @@ from .team_exports import read_all_teams, read_gpt_export
 STATIC = APP / "console_static"
 
 
-def create_server(store, port=8788):
+def create_server(store, port=8789):
     token = secrets.token_urlsafe(32)
 
     class Handler(BaseHTTPRequestHandler):
@@ -95,7 +95,7 @@ def create_server(store, port=8788):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", type=int, default=8788)
+    parser.add_argument("--port", type=int, default=8789)
     args = parser.parse_args()
     store = ConsoleStore()
     server = create_server(store, args.port)

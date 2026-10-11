@@ -30,6 +30,17 @@ DEFAULT_PROMPT = """你的目标是在 6–12 个月尺度上做到资本增值�
 不确定性：confidence 要如实填。它会被和实际结果比对打分，长期高估会被看出来。"""
 
 
+def load_prompts(root=CONSOLE_DATA):
+    """Load the separately editable Claude/Codex mandates shared with the daily coordinator."""
+    path = Path(root) / "prompts.json"
+    prompts = read(path) if path.exists() else {"claude": DEFAULT_PROMPT, "gpt": DEFAULT_PROMPT}
+    if not isinstance(prompts, dict) or set(prompts) != {"claude", "gpt"} or any(
+            not isinstance(value, str) or not 1 <= len(value.strip()) <= 12000
+            for value in prompts.values()):
+        raise ValueError("Claude 和 Codex 的任务各需 1–12,000 个字符")
+    return prompts
+
+
 class ConsoleStore:
     def __init__(self, root=CONSOLE_DATA, legacy=DATA):
         self.root = Path(root)
@@ -47,8 +58,7 @@ class ConsoleStore:
                 write(path.parent / "interruption.json", {"at": stamp(), "reason": "服务重新启动，上轮没有完成回执"})
 
     def prompts(self):
-        path = self.root / "prompts.json"
-        return read(path) if path.exists() else {"claude": DEFAULT_PROMPT, "gpt": DEFAULT_PROMPT}
+        return load_prompts(self.root)
 
     def save_prompts(self, prompts):
         if set(prompts) != {"claude", "gpt"} or any(not isinstance(p, str) or not 1 <= len(p.strip()) <= 12000 for p in prompts.values()):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -13,6 +14,8 @@ from zoneinfo import ZoneInfo
 from . import execution, packet_broker
 from .common import APP, ROOT, read, stamp, write
 from .credentials import paper_credentials
+from .paper_accounts import account_identity
+from .console_store import load_prompts
 
 EASTERN = ZoneInfo("America/New_York")
 RUN_AT = time(10, 0)  # assumption: wait 30 minutes after the regular-session open.
@@ -22,9 +25,13 @@ POLL_SECONDS = 30
 
 
 def _open_for_both():
+    account_ids = {}
     for provider in ("claude", "gpt"):
         credentials = paper_credentials(only=provider)[provider]
+        account_ids[provider] = account_identity(provider, credentials)
         execution.session_open(credentials)
+    if account_ids["claude"] == account_ids["gpt"]:
+        raise ValueError("Claude 与 Codex 绑定到了同一个 Alpaca Paper 账户；两队交易已停止")
 
 
 def run_daily(trading_date=None):
@@ -34,6 +41,11 @@ def run_daily(trading_date=None):
     state_file = STATE_ROOT / f"{trading_date}.json"
     if state_file.exists():
         return read(state_file)
+
+    mandates = load_prompts()
+    providers = {"claude_engine": "claude", "codex_engine": "gpt"}
+    mandate_hashes = {engine_id: hashlib.sha256(mandates[provider].encode("utf-8")).hexdigest()
+                      for engine_id, provider in providers.items()}
 
     # Avoid collecting data on weekends/holidays. Alpaca's clock is the source of truth.
     try:
@@ -47,6 +59,7 @@ def run_daily(trading_date=None):
         return state
     state = {"trading_date": trading_date, "status": "started", "started_at": stamp(),
              "schedule_time_et": RUN_AT.strftime("%H:%M"), "engines": {},
+             "mandate_sha256": mandate_hashes,
              "classification": "assumption: one automatic Paper trading cycle per session"}
     write(state_file, state, exclusive=True)
     try:
@@ -59,8 +72,13 @@ def run_daily(trading_date=None):
     write(state_file, state)
 
     for engine_id in ENGINES:
+        provider = providers[engine_id]
+        mandate_directory = STATE_ROOT / "mandates" / trading_date
+        mandate_directory.mkdir(parents=True, exist_ok=True)
+        mandate_file = mandate_directory / f"{engine_id}.txt"
+        mandate_file.write_text(mandates[provider], encoding="utf-8")
         command = [sys.executable, "-m", "engines.run", "--engine", engine_id,
-                   "--packet-id", pointer["packet_id"]]
+                   "--packet-id", pointer["packet_id"], "--mandate-file", str(mandate_file)]
         try:
             proc = subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
                                   encoding="utf-8", errors="replace",

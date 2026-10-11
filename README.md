@@ -32,7 +32,7 @@
 | `ai_portfolios/execution.py` | 唯一券商写模块；只发 Paper DAY 限价单，模型不能访问券商 |
 | `ai_portfolios/auto_trader.py` | 每个交易日 10:00 ET 冻结一份数据，再分别运行 Claude 与 Codex |
 | `ai_portfolios/console_store.py` | 本机控制台编排：不可改写的轮次档案，完整 prompt / 回复留存 |
-| `ai_portfolios/console_server.py` | 本机面板服务（默认 `http://127.0.0.1:8789/`） |
+| `ai_portfolios/console_server.py` | 合并研究档案与 Claude/Codex Paper 结果的本机面板（默认 `http://127.0.0.1:8789/`） |
 | `ai_portfolios/book.py` / `run.py` / `dashboard.py` | 早期本地模拟记账实验，保留作为历史，不与 Paper 账户结果混算 |
 | `ai_portfolios/test_core.py` / `test_console.py` / `engines/test_contract.py` | 核心、控制台及引擎契约回归用例 |
 
@@ -72,9 +72,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Start-SharedOutput.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\Install-AutoTraderTask.ps1
 ```
 
-浏览器打开 `http://127.0.0.1:8790/` 查看共享只读结果。第二条命令安装每日交易任务：Windows 在本机每天 7:00 启动，程序等待到 10:00 ET 后检查市场时段，再运行两支团队。
+第一条命令启动唯一主控制台 `http://127.0.0.1:8789/`：保留旧研究档案，并在“独立团队研究”中展示 Claude 与 Codex 各自的 Paper 决策、账户、委托及成交。两队研究任务可分别编辑，保存后用于下一次每日自动交易。`http://127.0.0.1:8790/` 是可选的只读结果页。第二条命令安装每日交易任务：Windows 在本机每天 7:00 启动，程序等待到 10:00 ET 后检查市场时段，再运行两支团队；启动前会核对两队绑定的 Paper 账户身份必须不同。
 
-不要把本机面板公开到互联网。旧研究控制台仍可在 8789 使用；8790 的共享面板只读 JSON 发布文件，不写控制台数据。
+不要把本机面板公开到互联网。8789 合并面板的账户刷新为只读，研究控制台运行不代表提交 Paper 订单；自动交易由独立计划任务负责。8790 的结果页只读 JSON 发布文件，不写控制台数据。
 
 ### prompt 回归（改 prompt 之前先跑这个）
 
