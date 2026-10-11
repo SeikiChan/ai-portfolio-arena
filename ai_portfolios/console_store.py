@@ -85,6 +85,8 @@ class ConsoleStore:
     def start(self, providers, prompts, packet_id=None):
         if not isinstance(providers, list) or not providers or len(set(providers)) != len(providers) or any(n not in {"claude", "gpt"} for n in providers):
             raise ValueError("请选择 Claude、GPT 或两者")
+        if "gpt" in providers:
+            raise ValueError("GPT 已迁移独立引擎工作区；此账户面板只允许运行 Claude")
         self.save_prompts(prompts)
         if not self.operation.acquire(blocking=False):
             raise ValueError("已有研究或账户刷新正在运行，不能重复启动")
@@ -93,7 +95,8 @@ class ConsoleStore:
             directory = self.root / "rounds" / run_id
             directory.mkdir(parents=True, exist_ok=False)
             mandates = {name: text_digest(prompts[name]) for name in providers}
-            job = {"id": run_id, "providers": providers, "started_at": stamp(), "status": "running", "stage": "读取两个 Paper 账户",
+            job = {"id": run_id, "engine_id": "claude_engine", "engine_version": INSTRUCTION_VERSION,
+                   "engine_author": "Claude", "providers": providers, "started_at": stamp(), "status": "running", "stage": "读取两个 Paper 账户",
                    "user_prompts": dict(prompts), "config": self.config, "environment": "alpaca_paper", "orders_submitted": False,
                    "instruction_version": INSTRUCTION_VERSION, "instruction_sha256": text_digest(research_instruction("alpaca_paper")),
                    "reasoning_effort": REASONING_EFFORT, "mandate_sha256": mandates,

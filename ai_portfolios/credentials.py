@@ -33,7 +33,7 @@ PAPER_PREFIX = {"claude": "Claude", "gpt": "Gpt"}
 ASSIGNMENT = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
 
 
-def parse(path):
+def parse(path, allowed=None):
     """Parse a dotenv file. Never executes it and never logs its contents."""
     path = Path(path)
     if not path.exists():
@@ -42,6 +42,8 @@ def parse(path):
     for line in path.read_text(encoding="utf-8-sig").splitlines():
         match = ASSIGNMENT.match(line)
         if match:
+            if allowed is not None and match[1] not in allowed:
+                continue
             if match[1] in values:
                 raise ValueError(f"{path.name} 存在重复变量名：{match[1]}")
             values[match[1]] = match[2].strip("\"'")
@@ -63,7 +65,8 @@ def paper_account_sources():
 
 def _resolve(names, sources):
     found, origin = {}, {}
-    files = [(path, parse(path)) for path in sources]
+    # A team-specific account read must not materialize the other team's credentials in memory.
+    files = [(path, parse(path, set(names))) for path in sources]
     for name in names:
         from_env = os.environ.get(name)
         if from_env:

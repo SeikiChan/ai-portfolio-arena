@@ -13,7 +13,7 @@ from pathlib import Path
 from .common import digest, finite, parse_time, stamp, write
 
 REASONING_EFFORT = "medium"
-INSTRUCTION_VERSION = "2026-10-10.v2"
+INSTRUCTION_VERSION = "2026-10-10.v3-paper-execution"
 ACTIONS = {"new", "add", "hold", "trim", "exit", "watch"}
 FLAT_ACTIONS = {"exit", "watch"}
 INVALIDATION_KINDS = {"price_below", "price_above", "news_event", "financial_event", "time"}
@@ -286,9 +286,11 @@ def validate(decision, config, packet, previous):
 def research_instruction(portfolio_mode="shadow"):
     if portfolio_mode != "alpaca_paper":
         return INSTRUCTION
-    instruction = INSTRUCTION.replace("ONE independent US equity research-only portfolio", "ONE dedicated Alpaca PAPER account in research-only mode")
-    instruction = instruction.replace("You will never\nsee your fill price; any hypothetical fill happens after you answer, at a price you cannot see.", "You will never see your fill price. This research console does not execute or simulate fills.")
-    return instruction + "\nAccount cash and positions below are observed from Alpaca Paper, not the former local shadow book. You produce recommendations only; no orders will be sent by this research process.\n"
+    instruction = INSTRUCTION.replace(
+        "ONE independent US equity research-only portfolio. You output recommendations only;\nthis process sends no orders.",
+        "ONE dedicated Alpaca PAPER portfolio. You output target allocations only; a separate deterministic executor may submit limit orders after validation.")
+    instruction = instruction.replace("You will never\nsee your fill price; any hypothetical fill happens after you answer, at a price you cannot see.", "You will not see the execution quote while making this decision.")
+    return instruction + "\nAccount cash and positions below are observed from your own Alpaca Paper account. You output a target portfolio only. If your response passes deterministic validation, a separate rule-based executor may translate target weights into whole-share limit orders in this Paper account. You have no broker tools and must never invent order status or claim a fill.\n"
 
 
 def build_prompt(packet, previous, config, user_prompt="", portfolio_mode="shadow"):

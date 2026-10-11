@@ -79,7 +79,8 @@ def create_server(store, port=8788):
                 elif self.path == "/api/run":
                     if 'gpt' in payload.get('providers', []):
                         raise ValueError('GPT 已迁移独立 worktree；共享网站只展示其结果，请在独立目录运行')
-                    self.reply(202, {"id": store.start(payload.get("providers"), payload.get("prompts", {}))})
+                    self.reply(202, {"id": store.start(payload.get("providers"), payload.get("prompts", {}),
+                                                         packet_id=payload.get("packet_id"))})
                 elif self.path == "/api/refresh":
                     self.reply(200, {"accounts": store.refresh()})
                 else:

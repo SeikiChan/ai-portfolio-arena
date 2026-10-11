@@ -8,33 +8,42 @@ from engines import contract, publish, registry
 PACKET = {"snapshot_id": "s1", "frozen_at": "2026-10-09T15:00:00+00:00", "features": [], "evidence": [], "errors": []}
 
 
-def round_dir(tmp_path, **overrides):
+def round_dir(tmp_path, prompt_body="prompt", **overrides):
     directory = tmp_path / "20261010T000000000000Z"
     directory.mkdir()
     write(directory / "packet.json", PACKET)
-    job = {"id": directory.name, "engine_id": "claude_engine", "engine_version": "2026-10-10.v2",
-           "engine_author": "Claude", "providers": ["claude", "gpt"], "environment": "alpaca_paper",
+    job = {"id": directory.name, "engine_id": "claude_engine", "engine_version": "2026-10-10.v3-paper-execution",
+           "engine_author": "Claude", "providers": ["claude"], "environment": "alpaca_paper",
+           "packet_id": "packet-1", "packet_frozen_at": "2026-10-09T15:00:00+00:00",
            "packet_sha256": digest(directory / "packet.json"), "instruction_sha256": "a" * 64,
-           "mandate_sha256": {"claude": "b" * 64, "gpt": "b" * 64}, "strict_comparison": True,
+           "mandate_sha256": {"claude": "b" * 64}, "strict_comparison": False,
+           "account_snapshot_id": "20261010T000000Z",
+           "account_snapshot": {"provider": "claude", "account_id_sha256": "c" * 64, "files": {}},
            "reasoning_effort": "medium", "orders_submitted": False, "status": "completed",
            "started_at": "2026-10-10T00:00:00+00:00", "completed_at": "2026-10-10T00:05:00+00:00"}
     job.update(overrides)
-    write(directory / "round.json", job)
-    write(directory / "receipt.json", {"round_id": directory.name, "orders_submitted": False})
+    account_dir = directory / "account_snapshot"
+    account_dir.mkdir()
+    write(account_dir / "snapshot.json", {"provider": job["account_snapshot"]["provider"], "status": "connected"})
+    job["account_snapshot"]["files"] = {"snapshot.json": digest(account_dir / "snapshot.json")}
     for provider in job["providers"] if isinstance(job["providers"], list) else []:
-        (directory / f"{provider}_prompt.txt").write_text("prompt", encoding="utf-8")
-        write(directory / f"{provider}_status.json", {"provider": provider, "status": "validated",
+        (directory / f"{provider}_prompt.txt").write_text(prompt_body, encoding="utf-8")
+        write(directory / f"{provider}_status.json", {"provider": provider, "status": "validated", "orders_submitted": False,
               "model_requested": "m", "decision": {"overview": "o", "cash_reason": "c", "evidence_gaps": [],
               "macro_claims": [], "memory_claims": [], "injection_flags": [], "positions": [
                   {"symbol": "MSFT", "action": "new", "target_weight": 0.1, "horizon_days": 60,
                    "confidence": 0.6, "thesis": "t", "changes_vs_last": "c", "evidence_ids": [],
                    "fact_refs": [], "evidence_quotes": [], "invalidation": {}}]}})
+    write(directory / "round.json", job)
+    write(directory / "receipt.json", {"round_id": directory.name, "engine_id": job["engine_id"],
+          "packet_id": job["packet_id"], "packet_sha256": job["packet_sha256"],
+          "files": {path.name: digest(path) for path in directory.iterdir() if path.is_file()}})
     return directory
 
 
 def test_valid_round_passes_the_contract(tmp_path):
     summary = contract.validate_round(round_dir(tmp_path))
-    assert summary["providers"] == ["claude", "gpt"] and summary["strict_comparison"] is True
+    assert summary["providers"] == ["claude"] and summary["strict_comparison"] is False
 
 
 def test_claude_engine_conforms_to_the_interface():
@@ -42,11 +51,11 @@ def test_claude_engine_conforms_to_the_interface():
     assert details["author"] == "Claude" and details["instruction_chars"] > 1000
 
 
-def test_codex_slot_is_declared_but_reported_unimplemented():
+def test_both_independent_engine_slots_are_implemented():
     engines, problems = registry.loaded()
     assert "codex_engine" in registry.declared()
-    assert "codex_engine" not in engines
-    assert "not implemented" in problems["codex_engine"]
+    assert "claude_engine" in engines and "codex_engine" in engines
+    assert not problems
 
 
 @pytest.mark.parametrize("value", [True, None, 0, "false"])
@@ -62,12 +71,14 @@ def test_packet_hash_mismatch_rejected(tmp_path):
 
 def test_strict_round_cannot_have_differing_mandates(tmp_path):
     with pytest.raises(ValueError, match="byte-identical"):
-        contract.validate_round(round_dir(tmp_path, mandate_sha256={"claude": "b" * 64, "gpt": "d" * 64}))
+        contract.validate_round(round_dir(tmp_path, engine_id="test_engine", providers=["claude", "gpt"],
+            mandate_sha256={"claude": "b" * 64, "gpt": "d" * 64}, strict_comparison=True))
 
 
 def test_strict_round_cannot_be_a_single_provider(tmp_path):
     with pytest.raises(ValueError, match="byte-identical"):
-        contract.validate_round(round_dir(tmp_path, providers=["claude"], mandate_sha256={"claude": "b" * 64}))
+        contract.validate_round(round_dir(tmp_path, engine_id="test_engine", providers=["claude"],
+            mandate_sha256={"claude": "b" * 64}, strict_comparison=True))
 
 
 def test_single_provider_round_is_allowed_when_not_called_strict(tmp_path):
@@ -85,7 +96,7 @@ def test_every_required_field_is_actually_required(tmp_path, field):
         contract.validate_round(directory)
 
 
-@pytest.mark.parametrize("missing", ["packet.json", "receipt.json", "claude_prompt.txt", "gpt_status.json"])
+@pytest.mark.parametrize("missing", ["packet.json", "receipt.json", "claude_prompt.txt", "claude_status.json"])
 def test_missing_required_file_rejected(tmp_path, missing):
     directory = round_dir(tmp_path)
     (directory / missing).unlink()
@@ -130,19 +141,19 @@ def test_export_publishes_one_entry_per_model(tmp_path, monkeypatch):
     monkeypatch.setattr(contract, "result_root", lambda engine_id: directory.parent)
     export = publish.build()
     assert export["schema_version"] == 1 and export["team_id"] == "claude-independent"
-    assert export["status"] == "available" and export["execution_mode"] == "read_only_research"
-    # The shared viewer renders one round entry per model, so a two-model round publishes two.
-    assert [row["provider"] for row in export["rounds"]] == ["claude", "gpt"]
-    assert [row["id"] for row in export["rounds"]] == [f"{directory.name}:claude", f"{directory.name}:gpt"]
+    assert export["status"] == "available" and export["execution_mode"] == "alpaca_paper_auto"
+    assert [row["provider"] for row in export["rounds"]] == ["claude"]
+    assert [row["id"] for row in export["rounds"]] == [f"{directory.name}:claude"]
     for row in export["rounds"]:
         for field in ("id", "completed_at", "status", "user_prompt", "full_prompt"):
             assert field in row
 
 
-def test_export_carries_no_account_money(tmp_path, monkeypatch):
-    directory = round_dir(tmp_path)
-    (directory / "claude_prompt.txt").write_text(
-        "RULES stay." + chr(10) + "INPUT:" + chr(10) + '{"alpaca_paper_portfolio": {"cash": 10000.0}}', encoding="utf-8")
+def test_export_never_carries_secrets_or_full_account_identity(tmp_path, monkeypatch):
+    # The prompt body has to be in place before round_dir seals the receipt: rewriting a file
+    # afterwards is exactly the tampering validate_round now rejects.
+    directory = round_dir(tmp_path, prompt_body="RULES stay." + chr(10) + "INPUT:" + chr(10)
+                          + '{"alpaca_paper_portfolio": {"cash": 10000.0}}')
     monkeypatch.setattr(contract, "result_root", lambda engine_id: directory.parent)
     export = publish.build()
     entry = export["rounds"][0]
@@ -150,10 +161,8 @@ def test_export_carries_no_account_money(tmp_path, monkeypatch):
     assert entry["full_prompt_sha256"] and entry["full_prompt_chars"] > 0
     assert export["orders_submitted"] is False
     body = __import__("json").dumps(export, ensure_ascii=False)
-    # Account keys, not the substrings: `cash_reason` is the model's prose about holding cash and belongs here.
-    for forbidden in ("cash", "equity", "last_equity", "account_number", "account_suffix", "avg_entry_price",
-                      "market_value", "unrealized_pl", "holdings", "qty", "filled_avg_price"):
-        assert f'"{forbidden}":' not in body
+    for forbidden in ('"account_id": "', "APCA_API_SECRET_KEY", "GptAPCA_API_KEY_ID", "ClaudeAPCA_API_KEY_ID"):
+        assert forbidden not in body
     position = export["rounds"][0]["positions"][0]
     assert set(position) == set(publish.POSITION_FIELDS)
 
@@ -169,5 +178,5 @@ def test_invalid_round_is_reported_not_dropped(tmp_path, monkeypatch):
 
 
 def test_engine_rejects_an_unknown_provider():
-    with pytest.raises(ValueError, match="both providers"):
+    with pytest.raises(ValueError, match="only the Claude"):
         registry.get("claude_engine").decide("grok", deepcopy(PACKET), {}, "", None, None)

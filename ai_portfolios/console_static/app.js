@@ -1,6 +1,6 @@
 "use strict";
 const $ = id => document.getElementById(id);
-let state = null, selected = null, filter = "all", view = "compose", initialized = false, dirty = false, busy = false;
+let state = null, selected = null, filter = "all", view = "gpt-lab", initialized = false, dirty = false, busy = false;
 const labels = {validated:"已完成", failed:"失败", running:"运行中", completed:"已完成", partial_failure:"部分失败", interrupted:"已中断"};
 const actions = {new:"新建", add:"加仓", hold:"继续持有", trim:"减仓", exit:"退出", watch:"观察"};
 // The model names a packet field; the panel prints the value, so no number is retyped on either side.
@@ -17,7 +17,7 @@ function prompts() {return {claude:$('claude-prompt').value,gpt:$('gpt-prompt').
 function accountCard(name) {
   const a=state.accounts[name], host=$(name+'-account'); host.replaceChildren();
   const heading=element('div',null,'account-heading'); heading.append(element('b',name==='claude'?'C':'G','model-mark '+name+'-mark'));
-  const title=element('div'); title.append(element('div',name==='claude'?'Claude':'GPT','model-name'),element('div',a?'ALPACA PAPER · 账户尾号 '+(a.account_suffix || '未知'):'尚未连接账户','account-id')); heading.append(title);
+  const title=element('div'); title.append(element('div',name==='claude'?'Claude':'Codex','model-name'),element('div',a?'ALPACA PAPER · 账户尾号 '+(a.account_suffix || '未知'):'尚未连接账户','account-id')); heading.append(title);
   const good=a && a.status==='connected' && !state.connection_error;
   heading.append(element('span',good?'已连接 · PAPER':state.connection_error?'连接待刷新':a?.status==='partial'?'数据不完整':'连接失败','badge'+(good?'':' bad'))); host.append(heading);
   const metrics=element('div',null,'account-metrics');
@@ -74,7 +74,7 @@ function buttons() {document.querySelectorAll('#run-claude,#run-gpt,#run-both,#r
 async function reload() {
   const data=await api('/api/state');state=data;
   if(!initialized){for(const name of ['claude','gpt'])$(name+'-prompt').value=data.prompts[name]; initialized=true;}
-  accountCard('claude');accountCard('gpt');renderRecords();buttons();$('gpt-prompt').disabled=true;$('same-prompt').disabled=true;if(view==='accounts')renderTables();
+  accountCard('claude');accountCard('gpt');renderRecords();buttons();$('gpt-prompt').disabled=true;$('same-prompt').disabled=true;if(view==='accounts')renderTables();if(view==='gpt-lab')renderGptLab().catch(e=>message(e.message,true));
   $('rules-text').textContent='共同股票池 '+state.rules.universe.length+' 只 · 最多 '+state.rules.max_positions+' 只正仓位 · 单股目标不超过 '+(state.rules.max_weight*100)+'% · 总目标仓位不超过 '+(state.rules.max_invested*100)+'%。'; $('instructions').textContent=state.research_instructions;
   $('last-update').textContent='面板更新 '+new Date().toLocaleTimeString('zh-CN',{hour12:false})+' · 账户需手动刷新';
   if(state.connection_error)message(state.connection_error,true);
@@ -100,19 +100,32 @@ async function renderGptLab() {
   const data=await api('/api/teams');
   const host=$('gpt-lab-content');host.replaceChildren();
   for(const team of data.teams) {
+    const teamName=team.engine_id==='codex_engine'?'Codex':'Claude';
     const panel=element('section',null,'team-panel');
-    panel.append(element('h3',team.team_id),element('p',team.note||''),
+    panel.append(element('h3',teamName+' 团队'),element('p',team.note||''),
       element('p','分支：'+(team.branch||'未知')+' · 工作目录：'+(team.workspace||'未知'),'hint'),
       element('p','最近发布：'+time(team.published_at)+' · 执行模式：'+(team.execution_mode||'read_only_research'),'hint'));
-    if(team.design_coverage&&!team.design_coverage.separable)
-      panel.append(element('p','设计未可分离，空缺格：'+(team.design_coverage.empty_cells.join('、')||'仅一个引擎'),'hint'));
     (team.rejected_rounds||[]).forEach(r=>panel.append(element('p','未通过契约的轮次 '+r.round_id+'：'+r.reason,'hint')));
     if(!team.rounds.length){panel.append(element('p','该团队已建立工作区，尚未发布新研究。旧记录不会计入这个实验。','empty'));host.append(panel);continue;}
-    const chooser=element('select');chooser.setAttribute('aria-label','选择 '+team.team_id+' 的研究轮次');
-    team.rounds.forEach(r=>{const o=element('option',time(r.completed_at)+' · '+(r.provider?r.provider+' · ':'')+(labels[r.status]||r.status));o.value=r.id;chooser.append(o);});
+    const chooser=element('select');chooser.setAttribute('aria-label','选择 '+teamName+' 的 Paper 轮次');
+    team.rounds.forEach(r=>{const o=element('option',time(r.completed_at)+' · '+teamName+' · '+(labels[r.status]||r.status));o.value=r.id;chooser.append(o);});
     if(!team.rounds.some(r=>r.id===independentRound[team.team_id]))independentRound[team.team_id]=team.rounds[0].id;
     chooser.value=independentRound[team.team_id];panel.append(chooser);const body=element('div');panel.append(body);
     const display=()=>{independentRound[team.team_id]=chooser.value;const r=team.rounds.find(x=>x.id===independentRound[team.team_id]);body.replaceChildren();
+      const account=r.account_observed||{};
+      if(r.execution_error)body.append(element('p','执行未完成：'+r.execution_error,'hint'));
+      body.append(element('h3','Paper 账户观察值'),element('p','净值 '+money(account.equity)+' · 现金 '+money(account.cash)+' · 可用购买力 '+money(account.buying_power),'hint'));
+      const positions=account.positions||[];
+      body.append(element('h3','当前持仓'));
+      if(positions.length){const list=element('div',null,'table-wrap'),table=element('table'),head=element('tr');
+        ['标的','股数','市值','未实现盈亏'].forEach(v=>head.append(element('th',v)));table.append(head);
+        positions.forEach(p=>{const row=element('tr');[p.symbol,p.qty,money(p.market_value),money(p.unrealized_pl)].forEach(v=>row.append(element('td',String(v??'—'))));table.append(row);});list.append(table);body.append(list);
+      }else body.append(element('p','暂无持仓','empty'));
+      body.append(element('h3','本轮委托与成交'));
+      const orders=r.broker_orders||[];
+      if(orders.length){orders.forEach(o=>{const req=o.request||{};body.append(element('p',(req.side||'').toUpperCase()+' '+(req.qty||'—')+' 股 '+(req.symbol||'—')+' · '+(o.outcome||'unknown')+' · '+(o.broker_status||o.broker_message||o.error||''),'hint'));});}
+      else body.append(element('p',r.execution_mode==='not_executed'?'本轮没有执行记录':'本轮没有新委托；以下为券商返回的近期委托','hint'));
+      (account.orders||[]).slice(0,30).forEach(o=>body.append(element('p',(o.side||'').toUpperCase()+' '+(o.filled_qty||0)+'/'+(o.qty||'—')+' 股 '+(o.symbol||'—')+' · '+(o.status||'unknown')+' · 均价 '+(o.filled_avg_price||'—'),'hint')));
       body.append(element('h3','本轮用户任务'),element('pre',r.user_prompt,'small-pre'),element('h3','原始回复'),element('pre',r.response||r.error||'没有模型回复','transcript'));
       const details=element('details',null,'rules');details.append(element('summary','查看实际发送的完整 Prompt'),element('pre',r.full_prompt||'尚未调用模型'));body.append(details);
     };

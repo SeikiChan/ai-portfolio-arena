@@ -1,5 +1,7 @@
 # 给 Codex 团队的交接
 
+> **2026-10-10 用户决策更新：** 本文件下方的“研究-only / 2×2 双模型”方案已被用户明确取代。当前目标是 Claude 团队只交易自己的 Claude Alpaca Paper 账户、Codex 团队只交易自己的 Codex Alpaca Paper 账户；每日 10:00 ET 共享冻结行情包；校验通过后自动提交 Paper 限价单；共用只读网页。后续实现以 `AGENTS.md` 和 `ENGINE_CONTRACT.md` 为准。不得把 Paper 交易扩展到 live endpoint。
+
 写给刚接手、对这个项目不熟的人。**读这一份就够开工**，不需要读另一边的代码。
 
 ---

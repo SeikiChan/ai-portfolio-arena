@@ -11,12 +11,13 @@ from pathlib import Path
 from ai_portfolios.common import ROOT, digest, read
 
 PROVIDERS = ("claude", "gpt")
+ENGINE_PROVIDER = {"claude_engine": "claude", "codex_engine": "gpt"}
 ENGINE_ID = re.compile(r"^[a-z][a-z0-9_]{2,31}$")
 ENGINES_ROOT = ROOT / "reports" / "engines"
 ROUND_STATUSES = {"completed", "partial_failure", "failed"}
 ROUND_REQUIRED = {"id", "engine_id", "engine_version", "engine_author", "providers", "environment",
-                  "packet_sha256", "instruction_sha256", "mandate_sha256", "strict_comparison",
-                  "reasoning_effort", "orders_submitted", "status", "started_at", "completed_at"}
+                  "packet_id", "packet_sha256", "packet_frozen_at", "instruction_sha256", "mandate_sha256", "strict_comparison",
+                  "reasoning_effort", "account_snapshot", "orders_submitted", "status", "started_at", "completed_at"}
 
 
 def result_root(engine_id):
@@ -58,6 +59,8 @@ def validate_round(directory):
         raise ValueError("Round is missing required fields: " + ",".join(sorted(missing)))
     if not ENGINE_ID.match(str(job["engine_id"])):
         raise ValueError("Round declares an invalid engine id")
+    if not isinstance(job["packet_id"], str) or not job["packet_id"] or not isinstance(job["packet_frozen_at"], str):
+        raise ValueError("Round must record the shared packet identity and frozen time")
     if job["status"] not in ROUND_STATUSES:
         raise ValueError("Round declares an unknown status")
     # Strictly False, never merely falsy: this is the one claim the whole project rests on.
@@ -67,6 +70,23 @@ def validate_round(directory):
     if not isinstance(providers, list) or not providers or len(set(providers)) != len(providers) \
             or any(p not in PROVIDERS for p in providers):
         raise ValueError("Round must declare a non-empty set of known providers")
+    expected_provider = ENGINE_PROVIDER.get(job["engine_id"])
+    if expected_provider and providers != [expected_provider]:
+        raise ValueError(f"{job['engine_id']} must run only its own provider: {expected_provider}")
+    account = job["account_snapshot"]
+    if not isinstance(account, dict) or account.get("provider") not in providers or \
+            not re.fullmatch(r"[0-9a-f]{64}", str(account.get("account_id_sha256", ""))):
+        raise ValueError("Round must identify its isolated Paper account snapshot")
+    account_dir = directory / "account_snapshot"
+    if not account_dir.is_dir() or not isinstance(account.get("files"), dict):
+        raise ValueError("Round is missing its Paper account snapshot manifest")
+    actual_account_files = {path.name for path in account_dir.iterdir() if path.is_file()}
+    if set(account["files"]) != actual_account_files:
+        raise ValueError("Paper account snapshot files do not match the manifest")
+    for name, expected in account["files"].items():
+        if Path(name).name != name or not re.fullmatch(r"[0-9a-f]{64}", str(expected)) or \
+                digest(account_dir / name) != expected:
+            raise ValueError("Paper account snapshot file hash mismatch: " + str(name))
     packet = directory / "packet.json"
     if not packet.exists():
         raise ValueError("Round is missing its frozen packet.json")
@@ -74,6 +94,25 @@ def validate_round(directory):
         raise ValueError("Round packet does not match its declared packet_sha256")
     if not (directory / "receipt.json").exists():
         raise ValueError("Round is missing receipt.json")
+    receipt = read(directory / "receipt.json")
+    for key in ("round_id", "engine_id", "packet_id", "packet_sha256", "files"):
+        if key not in receipt:
+            raise ValueError("Receipt is missing " + key)
+    if (receipt["round_id"] != job["id"] or receipt["engine_id"] != job["engine_id"] or
+            receipt["packet_id"] != job["packet_id"] or receipt["packet_sha256"] != job["packet_sha256"]):
+        raise ValueError("Receipt identity does not match the round")
+    if not isinstance(receipt["files"], dict):
+        raise ValueError("Receipt file hashes must be an object")
+    actual_files = {path.name for path in directory.iterdir() if path.is_file() and path.name != "receipt.json"}
+    if set(receipt["files"]) != actual_files:
+        raise ValueError("Receipt must hash every round file exactly once")
+    for name, expected in receipt["files"].items():
+        if not isinstance(name, str) or Path(name).name != name or name == "receipt.json" or \
+                not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise ValueError("Receipt contains an invalid file name or SHA-256")
+        path = directory / name
+        if not path.is_file() or digest(path) != expected:
+            raise ValueError("Receipt file hash mismatch: " + str(name))
     mandates = job["mandate_sha256"]
     if not isinstance(mandates, dict) or set(mandates) != set(providers):
         raise ValueError("Round must record one mandate hash per provider")
@@ -85,8 +124,20 @@ def validate_round(directory):
     if strict is not True and strict is not False:
         raise ValueError("strict_comparison must be a boolean")
     # A round where the mandates differ compares prompts, not models, and may never be called strict.
-    if strict and (len(providers) < 2 or len(set(mandates.values())) != 1):
+    if strict and (set(providers) != set(PROVIDERS) or len(set(mandates.values())) != 1):
         raise ValueError("A strict round needs both providers under a byte-identical mandate")
+    statuses = {}
+    for provider in providers:
+        status = read(directory / f"{provider}_status.json")
+        if status.get("provider") != provider or status.get("orders_submitted") is not False:
+            raise ValueError("Provider status identity or order boundary is invalid")
+        statuses[provider] = status.get("status")
+    if job["status"] == "completed" and any(value != "validated" for value in statuses.values()):
+        raise ValueError("A completed round contains a failed provider")
+    if job["status"] == "partial_failure" and ("validated" not in statuses.values() or all(value == "validated" for value in statuses.values())):
+        raise ValueError("partial_failure must preserve both a success and a failure")
+    if job["status"] == "failed" and "validated" in statuses.values():
+        raise ValueError("A round with a validated provider must preserve that partial success")
     return {"round_id": job["id"], "engine_id": job["engine_id"], "engine_version": job["engine_version"],
             "providers": sorted(providers), "status": job["status"], "strict_comparison": strict,
             "packet_sha256": job["packet_sha256"], "instruction_sha256": job["instruction_sha256"]}

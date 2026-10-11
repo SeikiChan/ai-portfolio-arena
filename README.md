@@ -2,7 +2,7 @@
 
 把 Claude 和 GPT 当成两个独立的投资经理：给它们**字节一致**的市场证据包，让它们各自管理一个独立的 Alpaca **Paper** 账户，并把每一次决策的论点、引用证据、失效条件和预计持有期完整存档。
 
-**这是研究与观察系统，不是交易系统。** 代码里不存在提交、撤销、修改或平仓订单的任何路径。生成买入建议不会改变任何账户持仓。两套系统的盈利能力**尚未经过验证**，任何收益结论都需要真实时间推进后才能谈。
+**这是 Paper 自动交易实验，不是实盘系统。** 通过确定性校验的目标组合会交给独立执行器，在对应的 Alpaca Paper 账户提交限价委托。绝不连接实盘；Paper 结果不是真实资金表现。两套策略盈利能力**尚未经过验证**，不能据短期结果宣称有效。
 
 灵感来自 [Rallies Arena](https://rallies.ai/arena) 的"实时证据 + AI 投资判断 + 持续复核"思路。**本项目不是 Rallies 的复刻**：它们的提示词、调度频率、工具链和风控约束没有公开到可复制的程度，本仓库里所有股票池、权重上限、调用频率都是我们自己的实验设定（assumption），不是已被证明最优的参数。
 
@@ -28,11 +28,21 @@
 | `ai_portfolios/data.py` | GET-only 公共数据采集：Alpaca 日线与报价、新闻摘要、FMP 季度利润表。保留原始响应与 SHA-256 |
 | `ai_portfolios/models.py` | 固定研究指令、输出 schema、模型调用、以及全部确定性校验 |
 | `ai_portfolios/prompt_bench.py` | 冻结数据包上的离线 prompt 回归台，含提示注入金丝雀 |
-| `ai_portfolios/paper_accounts.py` | 只读 Alpaca Paper 账户；模型与账户 ID 的绑定一经确立就固定 |
+| `ai_portfolios/paper_accounts.py` | 只读 Alpaca Paper 账户；Claude/Codex 只读各自凭据，账户与引擎绑定 |
+| `ai_portfolios/execution.py` | 唯一券商写模块；只发 Paper DAY 限价单，模型不能访问券商 |
+| `ai_portfolios/auto_trader.py` | 每个交易日 10:00 ET 冻结一份数据，再分别运行 Claude 与 Codex |
 | `ai_portfolios/console_store.py` | 本机控制台编排：不可改写的轮次档案，完整 prompt / 回复留存 |
 | `ai_portfolios/console_server.py` | 本机面板服务（默认 `http://127.0.0.1:8789/`） |
 | `ai_portfolios/book.py` / `run.py` / `dashboard.py` | 早期本地模拟记账实验，保留作为历史，不与 Paper 账户结果混算 |
-| `ai_portfolios/test_core.py` / `test_console.py` | 85 个边界用例 |
+| `ai_portfolios/test_core.py` / `test_console.py` / `engines/test_contract.py` | 核心、控制台及引擎契约回归用例 |
+
+## 独立研究引擎与共同数据
+
+`engines/` 将两支交易团队隔离：`claude_engine` 只调用 Claude、只读 Claude Paper 账户；`codex_engine` 只调用 Codex、只读 Codex Paper 账户。它们共享冻结行情包，但各自拥有 prompt、组合状态、交易历史和账户。旧 2×2 模型评测设计已被本交易目标取代。
+
+每个引擎轮次从 `%USERPROFILE%\\ai-arena-packets`（或 `AI_ARENA_PACKET_STORE`）按字节领取同一个冻结 packet，并记录 packet ID、哈希和冻结时间。引擎 runner 只领取，不会自行采集；没有有效 packet 时先由指定采集方运行 `python -m ai_portfolios.packet_broker freeze`。共享行情凭据位于 `%USERPROFILE%\\ai-arena-secrets\\market-data.env`，Paper 账户凭据位于同目录的 `paper-accounts.env`；凭据审计只输出来源和安全指纹，不输出密钥。
+
+交易周期的默认入口为 `python -m ai_portfolios.auto_trader --once`，服务在 10:00 ET 等待开市后会自动冻结一份共同 packet，分别启动两支引擎。校验失败、账户异常、陈旧报价、已有未完成委托或交易时段关闭时，该账户不会提交新委托。`python -m engines.run --engine claude_engine --no-submit` 或 `--engine codex_engine --no-submit` 仅生成 dry-run；默认运行会尝试向对应 Paper 账户提交限价单。结果网页只读两个团队发布的 JSON 文件。
 
 ## 安装
 
@@ -58,12 +68,13 @@ Copy-Item paper-accounts.env.example "$env:USERPROFILE\ai-arena-secrets\paper-ac
 ## 运行
 
 ```powershell
-.\.venv\Scripts\python.exe -m ai_portfolios.console_server --port 8789
+powershell -ExecutionPolicy Bypass -File .\scripts\Start-SharedOutput.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\Install-AutoTraderTask.ps1
 ```
 
-浏览器打开 `http://127.0.0.1:8789/`：分别填写两个模型的委托书、启动研究、查看本轮实际发送的完整正文、原始回复、通过校验的建议，以及两个 Paper 账户的真实持仓与委托记录。
+浏览器打开 `http://127.0.0.1:8790/` 查看共享只读结果。第二条命令安装每日交易任务：Windows 在本机每天 7:00 启动，程序等待到 10:00 ET 后检查市场时段，再运行两支团队。
 
-不要把这个本机面板公开到互联网。不要同时启动两份服务写同一个数据目录。
+不要把本机面板公开到互联网。旧研究控制台仍可在 8789 使用；8790 的共享面板只读 JSON 发布文件，不写控制台数据。
 
 ### prompt 回归（改 prompt 之前先跑这个）
 
@@ -82,7 +93,7 @@ Copy-Item paper-accounts.env.example "$env:USERPROFILE\ai-arena-secrets\paper-ac
 - 日线只用已完成的前一交易日及更早，不把当日未完成日线当完整日线。
 - 财务数据是单一供应商的当前 vintage，且只有最近两个季度 —— 两个季度不构成趋势。
 - FMP 免费档对部分股票返回 HTTP 402，这会被原样记录为数据缺口，不是公司基本面信号，也不允许用估算值填补。
-- 预计持有天数是模型意见，不是强制到期卖出。
+- 预计持有天数是模型意见，不是强制到期卖出；减仓和退出由后续目标组合生成限价委托。
 - 结构校验通过**不代表投资判断正确**。
 
 ## 审计与分类标注
