@@ -1,3 +1,4 @@
+import json
 from copy import deepcopy
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -80,8 +81,10 @@ def test_invented_reference_rejected():
 def test_other_stock_news_cannot_support_trade():
     data = packet()
     data["evidence"][1]["symbol"] = "NVDA"
-    with pytest.raises(ValueError, match="symbol-specific"):
+    # The message must name the symbol: with nine positions a retry cannot fix "some position".
+    with pytest.raises(ValueError, match="AAPL") as caught:
         validate(decision(), CONFIG, data, initial_book(100000))
+    assert "evidence_ids" in str(caught.value)
 
 
 def test_omitted_holding_rejected():
@@ -454,3 +457,79 @@ def test_a_synonym_in_the_claim_still_counts_as_attribution():
                              "quote": "报道称原油价格因袭击大涨"}]
     plan["positions"][0]["evidence_quotes"][0]["quote"] = "公司称需求稳定"
     assert validate(plan, CONFIG, data, initial_book(100000))
+
+
+class FakeProcess:
+    def __init__(self, payload):
+        self.returncode, self.stdout, self.stderr = 0, json.dumps(payload, ensure_ascii=False), ""
+
+
+def retrying_runner(monkeypatch, tmp_path, answers):
+    """Drive run_model with scripted CLI answers; no process, no network, no account."""
+    from ai_portfolios import models
+
+    sent = []
+
+    def fake_run(command, input=None, **kwargs):
+        sent.append(input)
+        return FakeProcess({"is_error": False, "structured_output": answers[len(sent) - 1]})
+
+    monkeypatch.setattr(models.subprocess, "run", fake_run)
+    monkeypatch.setattr(models, "model_command", lambda *a, **k: ["claude"])
+    monkeypatch.setattr(models, "model_environment", dict)
+    full = {"snapshot_id": "s", "frozen_at": TIME.isoformat(), "features": [], "errors": [], **packet()}
+    result = models.run_model("claude", full, initial_book(100000), CONFIG, tmp_path, "mandate", "shadow")
+    return result, sent
+
+
+def test_a_rejected_answer_gets_one_retry_carrying_the_exact_rejection(monkeypatch, tmp_path):
+    bad = decision()
+    bad["positions"][0]["evidence_quotes"][0]["quote"] = "这句话不在证据里"
+    result, sent = retrying_runner(monkeypatch, tmp_path, [bad, decision()])
+    assert result["status"] == "validated" and result["attempts"] == 2
+    assert "verbatim" in result["rejections_before_acceptance"][0]
+    # The retry must tell the model what was wrong, or it is just a second dice roll.
+    assert "verbatim" in sent[1] and "REJECTED" in sent[1]
+    assert len(sent) == 2
+
+
+def test_a_clean_answer_is_never_retried(monkeypatch, tmp_path):
+    result, sent = retrying_runner(monkeypatch, tmp_path, [decision()])
+    assert result["status"] == "validated" and result["attempts"] == 1
+    assert len(sent) == 1 and "rejections_before_acceptance" in result
+
+
+def test_two_rejections_end_the_round_with_no_decision(monkeypatch, tmp_path):
+    bad = decision()
+    bad["positions"][0]["evidence_ids"].append("made_up")
+    result, sent = retrying_runner(monkeypatch, tmp_path, [bad, bad])
+    assert result["status"] == "failed" and "decision" not in result
+    # Bounded: a third roll would start selecting the answer we like rather than the one we got.
+    assert len(sent) == 2
+
+
+def test_both_attempts_are_archived_separately(monkeypatch, tmp_path):
+    bad = decision()
+    bad["positions"][0]["evidence_quotes"][0]["quote"] = "这句话不在证据里"
+    retrying_runner(monkeypatch, tmp_path, [bad, decision()])
+    assert (tmp_path / "claude_response.txt").exists()
+    assert (tmp_path / "claude_response_retry1.txt").exists()
+    # The rejected answer stays readable: a retry must never overwrite what was actually returned.
+    assert "这句话不在证据里" in (tmp_path / "claude_response.txt").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("break_it,field", [
+    (lambda p: p.update(action="双倍梭哈"), "action"),
+    (lambda p: p.update(horizon_days=0), "horizon"),
+    (lambda p: p.update(confidence=1.0), "confidence"),
+    (lambda p: p.update(changes_vs_last="  "), "changes_vs_last"),
+    (lambda p: p.update(fact_refs=[]), "fact references"),
+    (lambda p: p.update(target_weight=0.99), "limit violation"),
+])
+def test_every_position_level_rejection_names_the_symbol(break_it, field):
+    """A retry can only fix what the rejection identifies, and a book holds up to ten names."""
+    plan = decision()
+    break_it(plan["positions"][0])
+    with pytest.raises(ValueError) as caught:
+        validate(plan, CONFIG, packet(), initial_book(100000))
+    assert "AAPL" in str(caught.value) and field in str(caught.value)

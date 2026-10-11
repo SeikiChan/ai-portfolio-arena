@@ -96,10 +96,10 @@ retyping a number. Every positive weight needs at least one price fact_ref for i
 including raw digits. A rephrased or unit-converted number is not a quote and will be rejected.
 Every evidence id used in fact_refs or evidence_quotes must also appear in that position's evidence_ids.
 Macro statements (index levels, yields, oil, rates, Fed, CPI) are NOT data in this packet. Any macro term you
-write in `overview`, a `thesis` or `changes_vs_last` must appear in a `macro_claims` entry with the news id
-and verbatim quote that reported it - otherwise do not write it at all. This applies to a macro term used
-AGAINST your own position too: naming a risk is wanted, and it still has to be attributed, so attribute it
-rather than dropping the risk to stay inside the rule.
+write in `overview`, a `thesis` or `changes_vs_last` should appear in a `macro_claims` entry with the news id
+and verbatim quote that reported it. One that does not is recorded against the round as untraceable, not
+rejected - so never drop a risk to stay inside the rule. Naming a macro risk that cuts against your own
+position is wanted; attribute it if the packet reported it, and state it anyway if it did not.
 Never state a valuation ratio, fair value, price target, earnings date, hit rate or profit forecast.
 
 PORTFOLIO
@@ -128,7 +128,8 @@ worse than 0.5.
 OUTPUT
 Return only the requested JSON. Write every prose field in Simplified Chinese.
 Separate three things explicitly: what the packet shows, what you hypothesise, what is missing.
-If evidence is inadequate, hold cash and list the gap. "证据不足" is a correct answer.
+Thin evidence is a reason to size small and name the gap in `evidence_gaps`, not a reason to fall below
+the participation floor - "证据不足" describes a position's size, never the book's absence.
 Code validates your answer. No historical backtest, no real-money order, no guaranteed profit.
 """
 
@@ -283,56 +284,56 @@ def validate(decision, config, packet, previous):
             raise ValueError("Invalid position fields")
         symbol = position["symbol"]
         if not isinstance(symbol, str) or symbol not in config["universe"] or symbol in seen:
-            raise ValueError("Unknown or duplicate symbol")
+            raise ValueError(f"Unknown or duplicate symbol: {symbol}")
         seen.add(symbol)
         weight = position["target_weight"]
         if not finite(weight) or not 0 <= weight <= config["max_weight"]:
-            raise ValueError("Position limit violation")
+            raise ValueError(f"Position limit violation on {symbol}: weight {weight!r}")
         if position["action"] not in ACTIONS:
-            raise ValueError("Unknown action")
+            raise ValueError(f"Unknown action on {symbol}: {position['action']!r}")
         if (position["action"] in FLAT_ACTIONS) != (weight == 0):
-            raise ValueError("Action contradicts target weight")
+            raise ValueError(f"Action contradicts target weight on {symbol}: {position['action']} with {weight}")
         if not isinstance(position["thesis"], str) or len(position["thesis"].strip()) < 8:
-            raise ValueError("Missing thesis")
+            raise ValueError(f"Missing thesis on {symbol}")
         changes = position["changes_vs_last"]
         if not isinstance(changes, str) or not changes.strip():
-            raise ValueError("Missing changes_vs_last")
+            raise ValueError(f"Missing changes_vs_last on {symbol}")
         # Only a name that was in the last decision has something to compare against; for a brand new
         # position "首次建仓" is complete information, and demanding more invites padding.
         if symbol in prior and len(changes.strip()) < 8:
             raise ValueError("Missing changes_vs_last")
         if type(position["horizon_days"]) is not int or not 1 <= position["horizon_days"] <= 365:
-            raise ValueError("Invalid horizon")
+            raise ValueError(f"Invalid horizon on {symbol}")
         if not finite(position["confidence"]) or not 0.05 <= position["confidence"] <= 0.95:
-            raise ValueError("Invalid confidence")
+            raise ValueError(f"Invalid confidence on {symbol}")
         ids = position["evidence_ids"]
         if not isinstance(ids, list) or not all(isinstance(i, str) and i in evidence for i in ids):
-            raise ValueError("Invented evidence reference")
+            raise ValueError(f"Invented evidence reference on {symbol}")
         if not isinstance(position["fact_refs"], list) or not position["fact_refs"]:
-            raise ValueError("Missing fact references")
+            raise ValueError(f"Missing fact references on {symbol}")
         price_fields = []
         for reference in position["fact_refs"]:
             item, field, _ = resolve_fact(reference, evidence, symbol)
             if item["id"] not in ids:
-                raise ValueError("Fact reference outside the listed evidence ids")
+                raise ValueError(f"Fact reference outside the listed evidence ids on {symbol}: {reference} is not in evidence_ids")
             if item["kind"] == "derived_price":
                 if field not in FEATURE_KEYS:
-                    raise ValueError("Unknown price feature")
+                    raise ValueError(f"Unknown price feature on {symbol}: {field}")
                 price_fields.append(field)
         if not isinstance(position["evidence_quotes"], list):
-            raise ValueError("Invalid evidence quotes")
+            raise ValueError(f"Invalid evidence quotes on {symbol}")
         for row in position["evidence_quotes"]:
             check_quote(row, evidence, allowed_ids=set(ids))
         check_invalidation(position["invalidation"], evidence, symbol)
         linked = [evidence[i] for i in ids if evidence[i]["symbol"] == symbol]
         if weight > 0:
             if not price_fields:
-                raise ValueError("Positive position missing a price fact reference")
+                raise ValueError(f"Positive position missing a price fact reference on {symbol}")
             prices = [e for e in linked if e["kind"] == "derived_price"]
             if not prices or not any(e["kind"] in {"news", "financials"} for e in linked):
-                raise ValueError("Positive position missing symbol-specific evidence")
+                raise ValueError(f"Positive position {symbol} needs both a price evidence id and a news or financials evidence id for {symbol} itself, listed in its evidence_ids")
             if any((parse_time(packet["frozen_at"]) - parse_time(e["as_of"])).total_seconds() > 5 * 86400 for e in prices):
-                raise ValueError("Stale price evidence")
+                raise ValueError(f"Stale price evidence on {symbol}")
             count += 1
         total += weight
     if total > config["max_invested"] + 1e-9 or count > config["max_positions"]:
@@ -440,6 +441,43 @@ def classify_failure(name, stdout, result):
     return result
 
 
+CORRECTION = """
+
+YOUR PREVIOUS ANSWER WAS REJECTED BY THE VALIDATOR AND NOTHING WAS RECORDED FROM IT.
+Rejection: {error}
+
+Answer the same round again, complete and self-contained, fixing only what the rejection names.
+Do not change a judgement you still hold just because the answer was rejected: the rejection is
+about form, not about whether you were right. If the rejection names a quote, copy that quote
+character for character from the cited evidence record, or cite a different record that really
+says it. This is the only retry; a second rejection ends the round with no decision at all.
+"""
+MAX_ATTEMPTS = 2
+
+
+def invoke(name, prompt, config, directory, result, attempt):
+    """One CLI call. Raw stdout, stderr and response are archived per attempt, never overwritten."""
+    suffix = "" if attempt == 1 else f"_retry{attempt - 1}"
+    with tempfile.TemporaryDirectory(prefix="ai_portfolio_") as scratch:
+        output = Path(scratch) / "answer.json"
+        schema = Path(scratch) / "schema.json"
+        write(schema, SCHEMA)
+        process = subprocess.run(model_command(name, config, schema, output), input=prompt, text=True,
+                                 encoding="utf-8", errors="replace", capture_output=True, cwd=scratch,
+                                 env=model_environment(), timeout=config["model_timeout_seconds"])
+        # CLI output contains only the deliberately public packet and synthetic holdings, not broker credentials.
+        (directory / f"{name}_stdout{suffix}.txt").write_text(process.stdout, encoding="utf-8")
+        (directory / f"{name}_stderr{suffix}.txt").write_text(process.stderr, encoding="utf-8")
+        result["return_code"] = process.returncode
+        if process.returncode:
+            classify_failure(name, process.stdout, result)
+            raise RuntimeError(result.get("error_hint") or
+                               f"{name} CLI failed; see saved {name}_stdout{suffix}.txt and {name}_stderr{suffix}.txt")
+        decision, answer = parse_output(name, process, output, result)
+        (directory / f"{name}_response{suffix}.txt").write_text(answer, encoding="utf-8")
+        return decision
+
+
 def run_model(name, packet, previous, config, directory, user_prompt="", portfolio_mode="shadow"):
     prompt = build_prompt(packet, previous, config, user_prompt, portfolio_mode)
     (directory / f"{name}_prompt.txt").write_text(prompt, encoding="utf-8")
@@ -450,26 +488,28 @@ def run_model(name, packet, previous, config, directory, user_prompt="", portfol
               "mandate_sha256": text_digest(user_prompt), "reasoning_effort": REASONING_EFFORT}
     write(directory / f"{name}_status.json", result)
     try:
-        with tempfile.TemporaryDirectory(prefix="ai_portfolio_") as scratch:
-            output = Path(scratch) / "answer.json"
-            schema = Path(scratch) / "schema.json"
-            write(schema, SCHEMA)
-            command = model_command(name, config, schema, output)
-            process = subprocess.run(command, input=prompt, text=True, encoding="utf-8", errors="replace",
-                                     capture_output=True, cwd=scratch, env=model_environment(), timeout=config["model_timeout_seconds"])
-            # CLI output contains only the deliberately public packet and synthetic holdings, not broker credentials.
-            (directory / f"{name}_stdout.txt").write_text(process.stdout, encoding="utf-8")
-            (directory / f"{name}_stderr.txt").write_text(process.stderr, encoding="utf-8")
-            result["return_code"] = process.returncode
-            if process.returncode:
-                classify_failure(name, process.stdout, result)
-                raise RuntimeError(result.get("error_hint") or
-                                   f"{name} CLI failed; see saved {name}_stdout.txt and {name}_stderr.txt")
-            decision, answer = parse_output(name, process, output, result)
-            (directory / f"{name}_response.txt").write_text(answer, encoding="utf-8")
-            result["decision"] = validate(decision, config, packet, previous)
-            result["quality_flags"] = quality_flags(result["decision"])
-            result["status"] = "validated"
+        # One bounded retry carrying the exact rejection. A validator rejection is usually clerical -
+        # one omitted evidence id among eight positions - and without this the account simply does
+        # nothing that day, which running unattended nobody notices. Never a second independent
+        # sample: the retry only ever answers the same round, and two rejections end it.
+        attempt, rejections = 1, []
+        while True:
+            body = prompt if attempt == 1 else prompt + CORRECTION.format(error=rejections[-1])
+            decision = invoke(name, body, config, directory, result, attempt)
+            try:
+                result["decision"] = validate(decision, config, packet, previous)
+                break
+            except (ValueError, KeyError) as exc:
+                rejections.append(str(exc)[:300])
+                result["attempts"] = attempt
+                result["rejections_before_acceptance"] = rejections
+                if attempt >= MAX_ATTEMPTS:
+                    raise
+                attempt += 1
+        result["attempts"] = attempt
+        result["rejections_before_acceptance"] = rejections
+        result["quality_flags"] = quality_flags(result["decision"])
+        result["status"] = "validated"
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, RuntimeError) as exc:
         result["status"] = "failed"
         result["error"] = str(exc)[:400] if not isinstance(exc, subprocess.TimeoutExpired) else "Model invocation timed out"
