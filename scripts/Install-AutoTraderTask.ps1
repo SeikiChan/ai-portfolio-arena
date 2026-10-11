@@ -10,7 +10,7 @@ $taskName = 'AI Portfolio Arena - Alpaca Paper Auto Trader'
 $action = New-ScheduledTaskAction -Execute $python `
     -Argument '-m ai_portfolios.auto_trader --once' `
     -WorkingDirectory $repoRoot
-$trigger = New-ScheduledTaskTrigger -Daily -At '7:00AM'
+$trigger = New-ScheduledTaskTrigger -Daily -At '6:30AM'
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 4) `
     -MultipleInstances IgnoreNew

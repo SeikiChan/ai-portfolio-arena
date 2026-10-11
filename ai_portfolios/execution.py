@@ -47,7 +47,7 @@ def assert_paper():
         raise ValueError("券商地址不是 Paper 域名，已拒绝提交")
 
 
-def session_open(credentials, getter=None):
+def session_open(credentials, getter=None, require_open=True):
     getter = getter or requests.get
     key, secret = credentials
     response = getter(BASE + "/v2/clock", headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
@@ -55,7 +55,7 @@ def session_open(credentials, getter=None):
     if response.status_code != 200:
         raise ValueError(f"无法读取交易时段：HTTP {response.status_code}")
     clock = response.json()
-    if not clock.get("is_open"):
+    if require_open and not clock.get("is_open"):
         raise ValueError(f"当前不在美股常规交易时段（下次开市 {clock.get('next_open')}），不提交委托")
     return clock
 
