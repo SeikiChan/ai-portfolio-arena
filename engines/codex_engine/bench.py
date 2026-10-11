@@ -61,7 +61,12 @@ def run(packet_path, provider, repeat, mandate, output_root=None):
     packet = read(packet_path)
     config = read(APP / "config.json")
     packet_hash = digest(packet_path)
-    if packet_path.parent.joinpath("store_manifest.json").exists():
+    if packet_path.name == "decision_packet.json" and packet_path.parent.joinpath("round.json").exists():
+        job = read(packet_path.parent / "round.json")
+        if job.get("decision_packet_sha256") != packet_hash:
+            raise ValueError("Saved research packet does not match the round hash")
+        packet_id = job.get("packet_id")
+    elif packet_path.parent.joinpath("store_manifest.json").exists():
         manifest = read(packet_path.parent / "store_manifest.json")
         if manifest.get("packet_sha256") != packet_hash:
             raise ValueError("Saved packet does not match the shared store hash")
