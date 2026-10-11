@@ -106,10 +106,25 @@ def test_disable_research_creates_distinct_experiment():
     assert disabled != enabled and disabled.startswith("packet-only-v1-")
 
 
+def test_codex_uses_own_versioned_mandate_without_changing_claude_default():
+    mandate = run.default_mandate("codex_engine")
+    assert mandate.startswith("委托版本：codex-capital-growth-v2-20261011")
+    assert run.default_mandate("claude_engine") == run.DEFAULT_MANDATE
+    engine = run.registry.get("codex_engine")
+    assert research.identity(engine, {}, mandate) != research.identity(engine, {}, run.DEFAULT_MANDATE)
+
+
 def test_research_is_enabled_only_for_explicitly_selected_team():
     config = {"research": {"enabled": True, "engines": ["codex_engine"]}}
     assert research.enabled("codex_engine", config)
     assert not research.enabled("claude_engine", config)
+
+
+def test_coordinator_timeout_includes_research_budget_only_for_enabled_engine():
+    from ai_portfolios.auto_trader import engine_timeout
+    config = {"model_timeout_seconds": 600, "research": {"enabled": True, "engines": ["codex_engine"]}}
+    assert engine_timeout("codex_engine", config) == 780 + research.TIME_BUDGET
+    assert engine_timeout("claude_engine", config) == 780
 
 
 def test_unreadable_source_bytes_survive_parse_failure(monkeypatch):

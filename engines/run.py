@@ -25,6 +25,12 @@ def _sha(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def default_mandate(engine_id):
+    engine = registry.get(engine_id)
+    loader = getattr(engine, "default_mandate", None)
+    return loader() if callable(loader) else DEFAULT_MANDATE
+
+
 @contextmanager
 def _engine_lock(path):
     """One active process per account/engine; OS releases the lock after a crash."""
@@ -75,9 +81,11 @@ def _bind_account(engine_id, account_id):
     return path
 
 
-def run(engine_id, mandate, packet_id=None, config=None, output_root=None, submit_orders=True):
+def run(engine_id, mandate=None, packet_id=None, config=None, output_root=None, submit_orders=True):
     if engine_id not in ENGINE_PROVIDER:
         raise ValueError("只有 claude_engine 和 codex_engine 可以运行交易轮次")
+    if mandate is None:
+        mandate = default_mandate(engine_id)
     engine = registry.get(engine_id)
     provider = ENGINE_PROVIDER[engine_id]
     config = config or read(APP / "config.json")
@@ -206,7 +214,7 @@ def main():
     parser.add_argument("--packet-id", help="join this exact shared packet; never collect inside an engine")
     parser.add_argument("--no-submit", action="store_true", help="build a dry-run plan only")
     args = parser.parse_args()
-    mandate = Path(args.mandate_file).read_text(encoding="utf-8") if args.mandate_file else DEFAULT_MANDATE
+    mandate = Path(args.mandate_file).read_text(encoding="utf-8") if args.mandate_file else default_mandate(args.engine)
     directory, job, execution_result = run(args.engine, mandate, args.packet_id,
                                            submit_orders=not args.no_submit)
     print(json.dumps({"round_id": job["id"], "engine_id": job["engine_id"],

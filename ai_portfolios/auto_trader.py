@@ -21,6 +21,11 @@ STATE_ROOT = ROOT / "reports" / "auto_trader"
 POLL_SECONDS = 30
 
 
+def engine_timeout(engine_id, config):
+    from engines.research import TIME_BUDGET, enabled
+    return config["model_timeout_seconds"] + 180 + (TIME_BUDGET if enabled(engine_id, config) else 0)
+
+
 def _open_for_both():
     for provider in ("claude", "gpt"):
         credentials = paper_credentials(only=provider)[provider]
@@ -64,7 +69,7 @@ def run_daily(trading_date=None):
         try:
             proc = subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
                                   encoding="utf-8", errors="replace",
-                                  timeout=read(APP / "config.json")["model_timeout_seconds"] + 180)
+                                  timeout=engine_timeout(engine_id, read(APP / "config.json")))
             details = {}
             try:
                 details = json.loads(proc.stdout)

@@ -108,7 +108,7 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.repeat <= 100:
         parser.error("--repeat must be between 1 and 100")
-    mandate = Path(args.mandate_file).read_text(encoding="utf-8") if args.mandate_file else "请说明证据、推断、风险和可检验的失效条件。"
+    mandate = Path(args.mandate_file).read_text(encoding="utf-8") if args.mandate_file else ENGINE.default_mandate()
     directory, summary = run(args.packet, args.provider, args.repeat, mandate, args.out_root)
     print(json.dumps({"directory": str(directory), "summary": summary}, ensure_ascii=False, indent=2))
 
