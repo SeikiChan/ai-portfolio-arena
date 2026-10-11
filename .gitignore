@@ -1,8 +1,10 @@
-# Credentials: never commit. Alpaca market-data keys and the two Paper account keys.
+# Credentials: never commit. They live in the shared secrets directory, not in any repository.
+# *.env catches market-data.env and paper-accounts.env too: the README names those files, which
+# makes copying them in here an easy mistake, and they must not be committable when it happens.
 .env
 .env.*
-!.env.example
-!.env.aitrading.example
+*.env
+!*.env.example
 
 # Local research output: account snapshots, broker records, saved prompts and model responses.
 /reports/

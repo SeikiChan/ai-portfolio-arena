@@ -7,8 +7,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from .common import APP, DATA, ROOT, digest, env_values, external_reference, now, read, stamp, write
-from .data import collect
+from .common import APP, DATA, ROOT, digest, external_reference, now, read, stamp, write
+from . import packet_broker
 from .models import INSTRUCTION_VERSION, REASONING_EFFORT, research_instruction, run_model, text_digest
 from .paper_accounts import capture, load_credentials, model_portfolio, public_account
 
@@ -82,7 +82,7 @@ class ConsoleStore:
         finally:
             self.operation.release()
 
-    def start(self, providers, prompts):
+    def start(self, providers, prompts, packet_id=None):
         if not isinstance(providers, list) or not providers or len(set(providers)) != len(providers) or any(n not in {"claude", "gpt"} for n in providers):
             raise ValueError("请选择 Claude、GPT 或两者")
         self.save_prompts(prompts)
@@ -98,7 +98,9 @@ class ConsoleStore:
                    "instruction_version": INSTRUCTION_VERSION, "instruction_sha256": text_digest(research_instruction("alpaca_paper")),
                    "reasoning_effort": REASONING_EFFORT, "mandate_sha256": mandates,
                    # A round where the two mandates differ compares prompts, not models, and must not enter a model ranking.
-                   "strict_comparison": len(providers) > 1 and len(set(mandates.values())) == 1}
+                   "strict_comparison": len(providers) > 1 and len(set(mandates.values())) == 1,
+                   # Set to join an existing shared round instead of freezing a new packet.
+                   "packet_id": packet_id}
             write(directory / "round.json", job, exclusive=True)
             with self.guard:
                 self.active = job
@@ -125,12 +127,20 @@ class ConsoleStore:
             snapshot, credentials = self._capture()
             write(directory / "accounts_before.json", snapshot, exclusive=True)
             # Shared market feed, dedicated account state. Keys never enter model context.
-            keys = env_values()
-            keys["APCA_API_KEY_ID"], keys["APCA_API_SECRET_KEY"] = credentials["gpt"]
-            job["stage"] = "冻结共同市场证据"
+            # The market-data pair is a neutral third Paper key, not either team's account: the shared
+            # packet must come from one source, and the collector must not be one of the contestants.
+            job["stage"] = "领取共同冻结证据包"
             self._progress(directory, job)
-            packet = collect(directory, self.config, keys=keys)
-            job["packet_hash"] = digest(directory / "packet.json")
+            # One freeze per round, read by every team. Never collect here: a round that collected its
+            # own evidence cannot be paired with another team's round on the same market state.
+            pointer = packet_broker.claim(self.config, directory, job.get("packet_id"),
+                                          collector="paper_console")
+            packet = read(directory / "packet.json")
+            job["packet_id"] = pointer["packet_id"]
+            job["packet_sha256"] = pointer["packet_sha256"]
+            job["packet_frozen_at"] = pointer["frozen_at"]
+            job["packet_age_seconds"] = pointer["age_seconds"]
+            job["packet_hash"] = pointer["packet_sha256"]
             job["account_snapshot_id"] = snapshot["snapshot_id"]
             job["stage"] = "AI 独立研究中"
             self._progress(directory, job)
