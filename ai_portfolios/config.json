@@ -13,6 +13,7 @@
   "minimum_execution_delay_seconds": 60,
   "plan_lifetime_hours": 24,
   "model_timeout_seconds": 600,
+  "research": {"enabled": true, "engines": ["codex_engine"]},
   "claude_model": "sonnet",
   "gpt_model": "gpt-6-astra",
   "news_days": 7,

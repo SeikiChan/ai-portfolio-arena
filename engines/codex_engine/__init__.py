@@ -217,6 +217,9 @@ class CodexEngine:
     def schema(self):
         return SCHEMA
 
+    def default_mandate(self):
+        return Path(__file__).with_name("mandate.txt").read_text(encoding="utf-8")
+
     def decide(self, provider, packet, previous, mandate, directory, config=None):
         if provider != "gpt":
             raise ValueError("codex_engine may run only the Codex/GPT provider")

@@ -61,7 +61,12 @@ def run(packet_path, provider, repeat, mandate, output_root=None):
     packet = read(packet_path)
     config = read(APP / "config.json")
     packet_hash = digest(packet_path)
-    if packet_path.parent.joinpath("store_manifest.json").exists():
+    if packet_path.name == "decision_packet.json" and packet_path.parent.joinpath("round.json").exists():
+        job = read(packet_path.parent / "round.json")
+        if job.get("decision_packet_sha256") != packet_hash:
+            raise ValueError("Saved research packet does not match the round hash")
+        packet_id = job.get("packet_id")
+    elif packet_path.parent.joinpath("store_manifest.json").exists():
         manifest = read(packet_path.parent / "store_manifest.json")
         if manifest.get("packet_sha256") != packet_hash:
             raise ValueError("Saved packet does not match the shared store hash")
@@ -103,7 +108,7 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.repeat <= 100:
         parser.error("--repeat must be between 1 and 100")
-    mandate = Path(args.mandate_file).read_text(encoding="utf-8") if args.mandate_file else "请说明证据、推断、风险和可检验的失效条件。"
+    mandate = Path(args.mandate_file).read_text(encoding="utf-8") if args.mandate_file else ENGINE.default_mandate()
     directory, summary = run(args.packet, args.provider, args.repeat, mandate, args.out_root)
     print(json.dumps({"directory": str(directory), "summary": summary}, ensure_ascii=False, indent=2))
 

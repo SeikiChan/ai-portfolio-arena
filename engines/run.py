@@ -15,7 +15,7 @@ from ai_portfolios.common import APP, ROOT, digest, now, read, stamp, write
 from ai_portfolios.credentials import paper_credentials
 from ai_portfolios.paper_accounts import model_portfolio, read_one
 
-from . import contract, registry
+from . import contract, registry, research
 
 ENGINE_PROVIDER = {"claude_engine": "claude", "codex_engine": "gpt"}
 DEFAULT_MANDATE = """以 6–12 个月为复核尺度，优先做资本增值。请结合新闻、财务数据与公司间影响，说明反面证据和数据缺口。持有理由没有新变化时可以不调整；现金应说明等待的具体证据。"""
@@ -23,6 +23,12 @@ DEFAULT_MANDATE = """以 6–12 个月为复核尺度，优先做资本增值。
 
 def _sha(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def default_mandate(engine_id):
+    engine = registry.get(engine_id)
+    loader = getattr(engine, "default_mandate", None)
+    return loader() if callable(loader) else DEFAULT_MANDATE
 
 
 @contextmanager
@@ -48,11 +54,15 @@ def _engine_lock(path):
             msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-def _latest_decision(rounds_root, provider):
+def _latest_decision(rounds_root, provider, experiment_id=None):
     for directory in sorted((p for p in Path(rounds_root).glob("*") if p.is_dir()), reverse=True):
         path = directory / f"{provider}_status.json"
         if not path.exists():
             continue
+        if experiment_id is not None:
+            job_path = directory / "round.json"
+            if not job_path.exists() or read(job_path).get("experiment_id") != experiment_id:
+                continue
         status = read(path)
         if status.get("status") == "validated" and isinstance(status.get("decision"), dict):
             return status["decision"]
@@ -71,12 +81,16 @@ def _bind_account(engine_id, account_id):
     return path
 
 
-def run(engine_id, mandate, packet_id=None, config=None, output_root=None, submit_orders=True):
+def run(engine_id, mandate=None, packet_id=None, config=None, output_root=None, submit_orders=True):
     if engine_id not in ENGINE_PROVIDER:
         raise ValueError("只有 claude_engine 和 codex_engine 可以运行交易轮次")
+    if mandate is None:
+        mandate = default_mandate(engine_id)
     engine = registry.get(engine_id)
     provider = ENGINE_PROVIDER[engine_id]
     config = config or read(APP / "config.json")
+    research_enabled = research.enabled(engine_id, config)
+    experiment_id = research.identity(engine, config, mandate)
     rounds_root = Path(output_root) if output_root else contract.result_root(engine_id)
     rounds_root.mkdir(parents=True, exist_ok=True)
     round_id = now().strftime("%Y%m%dT%H%M%S%fZ")
@@ -113,11 +127,12 @@ def run(engine_id, mandate, packet_id=None, config=None, output_root=None, submi
         packet = read(directory / "packet.json")
         if digest(directory / "packet.json") != pointer["packet_sha256"]:
             raise ValueError("Claimed packet bytes do not match the shared store")
-        previous_decision = _latest_decision(rounds_root, provider)
+        previous_decision = _latest_decision(rounds_root, provider, experiment_id)
         previous = model_portfolio(account, previous_decision)
         mandates = {provider: _sha(mandate)}
         instruction_hash = _sha(engine.instruction("alpaca_paper"))
         job = {"id": round_id, "engine_id": engine.engine_id, "engine_version": engine.version,
+               "experiment_id": experiment_id, "research_enabled": research_enabled,
                "engine_author": engine.author, "providers": [provider], "environment": "alpaca_paper",
                "account_snapshot_id": account.get("fetched_at"),
                "account_snapshot": {"provider": provider,
@@ -133,7 +148,18 @@ def run(engine_id, mandate, packet_id=None, config=None, output_root=None, submi
         write(directory / "round.json", job, exclusive=True)
 
         try:
-            result = engine.decide(provider, packet, previous, mandate, directory, config)
+            decision_packet = packet
+            if research_enabled:
+                # A research failure still leaves a sealable failed round; no portfolio is fabricated.
+                (directory / f"{provider}_prompt.txt").write_text(
+                    "Final decision not invoked yet; see research planning artifacts.", encoding="utf-8")
+                decision_packet = research.run(provider, packet, config, directory)
+                job["decision_packet_sha256"] = digest(directory / "decision_packet.json")
+                job["research_completed_at"] = decision_packet["frozen_at"]
+            result = engine.decide(provider, decision_packet, previous, mandate, directory, config)
+            if research_enabled:
+                result["experiment_id"] = experiment_id
+                result["decision_packet_sha256"] = job["decision_packet_sha256"]
             result.setdefault("provider", provider)
             result.setdefault("engine_id", engine.engine_id)
             result.setdefault("engine_version", engine.version)
@@ -144,6 +170,7 @@ def run(engine_id, mandate, packet_id=None, config=None, output_root=None, submi
         except Exception as exc:
             statuses = {provider: "failed"}
             write(directory / f"{provider}_status.json", {"provider": provider, "status": "failed",
+                  "failure_kind": getattr(exc, "failure_kind", "round_failure"),
                   "error": f"{type(exc).__name__}: {str(exc)[:250]}", "completed_at": stamp(),
                   "orders_submitted": False})
 
@@ -187,7 +214,7 @@ def main():
     parser.add_argument("--packet-id", help="join this exact shared packet; never collect inside an engine")
     parser.add_argument("--no-submit", action="store_true", help="build a dry-run plan only")
     args = parser.parse_args()
-    mandate = Path(args.mandate_file).read_text(encoding="utf-8") if args.mandate_file else DEFAULT_MANDATE
+    mandate = Path(args.mandate_file).read_text(encoding="utf-8") if args.mandate_file else default_mandate(args.engine)
     directory, job, execution_result = run(args.engine, mandate, args.packet_id,
                                            submit_orders=not args.no_submit)
     print(json.dumps({"round_id": job["id"], "engine_id": job["engine_id"],

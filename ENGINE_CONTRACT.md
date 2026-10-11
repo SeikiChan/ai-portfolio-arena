@@ -21,7 +21,9 @@ independent automated Paper trading teams, not a Claude-vs-GPT prompt benchmark.
 - `claude_engine` may invoke only the Claude provider and may load only Claude Paper credentials.
 - `codex_engine` may invoke only the GPT/Codex provider and may load only Codex Paper credentials.
 - The two engines never import or read each other's prompt, decisions, account data, or execution logs.
-- Both engines may read the exact same frozen packet from the neutral packet store. Engines do not collect market data.
+- Both engines start with the exact same frozen market packet from the neutral packet store. Optional
+  model-directed public research is isolated per provider and saved separately; it never overwrites the
+  shared packet. Research-enabled teams do not see identical final evidence or identical decision times.
 - Each team publishes a sanitized `exports/dashboard.json`. The shared console reads those files only; it never imports engine code and never sends orders.
 - A Paper account identity is pinned to its engine. A changed account identity stops the run and requires a new experiment.
 
@@ -82,9 +84,30 @@ Every report records `round_id`, `packet_id`, packet hash, account snapshot iden
 window and calculation source. Use `observed`, `derived`, `assumption`, and `unknown` accurately. Missing
 data is never replaced with a guess or a prior close presented as a fill.
 
-The model remains tool-free: it cannot access the network, local files, shell, broker credentials, or order
-API. CLI execution uses an isolated scratch directory and removes broker/data credentials from its process
-environment.
+User-authorized public research (`public-research-v1`) is enabled by `config.research.enabled` and the
+engine IDs in `config.research.engines` (currently Codex only, preserving Claude's independent work). A bounded
+provider-specific planning loop can request public web/news/paper searches, HTTPS document/PDF reads,
+and finite arithmetic. The host dispatches those requests; the CLI itself still has no native tools.
+Research receives public packet evidence, not account snapshots, and only invokes its own provider.
+No local-file, arbitrary-shell, authenticated-site, broker, cancellation or order tool is exposed.
+The network worker pins public DNS addresses, checks every redirect, enforces byte/time limits and
+receives no API credentials. Source failures are `unknown`, not synthetic evidence.
+
+The original `packet.json` stays immutable. Research requests, responses and raw downloaded bytes are
+append-only top-level round artifacts sealed by the existing receipt. `decision_packet.json` freezes
+the expanded evidence with its own timestamp and hash; its `base_frozen_at` preserves market-data time.
+Retrieved content is not automatically verified fact, retrieval time is not publication time, and papers
+are not company financial statements. Existing position evidence/schema requirements still apply.
+The final decision CLI remains tool-free and is validated against precisely this expanded packet.
+
+`experiment_id` hashes research implementation, policy, model/config, engine instruction and mandate.
+Changing any of these starts another research experiment. Previous decisions are loaded only from the
+same experiment; actual existing Paper holdings are retained. Do not splice performance across IDs or
+treat pre-existing account gains as new-experiment gains. Research planning failures fail the round;
+individual unavailable sources are archived and reported as unknown. Limits are resource budgets, not
+trading targets: six planning turns, twelve calls, ten minutes of research, forty seconds per tool.
+Historical prompt benchmarks must replay saved `decision_packet.json` without live research. Do not
+attach today's web research to historical inputs and call that a backtest.
 
 ## 5. Publication
 
