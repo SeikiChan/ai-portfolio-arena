@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from .common import APP
 from .console_store import ConsoleStore
+from .team_exports import read_all_teams, read_gpt_export
 
 STATIC = APP / "console_static"
 
@@ -48,6 +49,10 @@ def create_server(store, port=8788):
                     self.reply(200, (STATIC / filename).read_bytes(), mime)
                 elif parsed.path == "/api/state":
                     self.reply(200, {**store.state(), "csrf_token": token})
+                elif parsed.path == "/api/teams/gpt":
+                    self.reply(200, read_gpt_export())
+                elif parsed.path == "/api/teams":
+                    self.reply(200, read_all_teams())
                 elif parsed.path == "/api/record":
                     identity = parse_qs(parsed.query).get("id", [""])[0]
                     self.reply(200, store.detail(identity))
@@ -72,7 +77,10 @@ def create_server(store, port=8788):
                 if self.path == "/api/prompts":
                     self.reply(200, {"prompts": store.save_prompts(payload)})
                 elif self.path == "/api/run":
-                    self.reply(202, {"id": store.start(payload.get("providers"), payload.get("prompts", {}))})
+                    if 'gpt' in payload.get('providers', []):
+                        raise ValueError('GPT 已迁移独立 worktree；共享网站只展示其结果，请在独立目录运行')
+                    self.reply(202, {"id": store.start(payload.get("providers"), payload.get("prompts", {}),
+                                                         packet_id=payload.get("packet_id"))})
                 elif self.path == "/api/refresh":
                     self.reply(200, {"accounts": store.refresh()})
                 else:

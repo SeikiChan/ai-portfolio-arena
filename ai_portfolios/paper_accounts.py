@@ -7,7 +7,8 @@ from pathlib import Path
 
 import requests
 
-from .common import APP, ROOT, digest, finite, external_reference, stamp, write
+from .common import APP, digest, finite, external_reference, stamp, write
+from .credentials import paper_credentials, parse
 
 BASE = "https://paper-api.alpaca.markets"
 PREFIX = {"claude": "Claude", "gpt": "Gpt"}
@@ -18,27 +19,24 @@ ENDPOINTS = {
 }
 
 
-def load_credentials(path=None):
-    path = Path(path or ROOT / ".env.aitrading")
-    try:
-        lines = path.read_text(encoding="utf-8-sig").splitlines()
-    except FileNotFoundError as exc:
-        raise ValueError("未找到 .env.aitrading") from exc
-    values = {}
-    for line in lines:
-        match = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$", line)
-        if match:
-            if match[1] in values:
-                raise ValueError("账户配置存在重复变量名")
-            values[match[1]] = match[2].strip("\"'")
+def load_credentials(path=None, only=None):
+    if path is not None:
+        return _from_file(Path(path), only)
+    return paper_credentials(only)
+
+
+def _from_file(path, only=None):
+    values = parse(path)
+    if not values:
+        raise ValueError(f"未找到 {path.name}")
     result = {}
-    for name, prefix in PREFIX.items():
-        key = values.get(prefix + "APCA_API_KEY_ID")
-        secret = values.get(prefix + "APCA_API_SECRET_KEY")
+    for name in ([only] if only else list(PREFIX)):
+        prefix = PREFIX[name]
+        key, secret = values.get(prefix + "APCA_API_KEY_ID"), values.get(prefix + "APCA_API_SECRET_KEY")
         if not key or not secret:
             raise ValueError(f"{name} 的 Paper 凭据尚未完整配置")
         result[name] = (key, secret)
-    if result["claude"][0] == result["gpt"][0]:
+    if not only and len({pair[0] for pair in result.values()}) != len(result):
         raise ValueError("两个模型使用了相同 API Key，请配置不同 Paper 账户")
     return result
 

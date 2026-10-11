@@ -166,11 +166,10 @@ def test_out_of_universe_holdings_never_reach_model(tmp_path, monkeypatch):
     a = account()
     a['positions'] = [{'symbol':'OUTSIDE_UNIVERSE','qty':'1','current_price':'100'}]
     monkeypatch.setattr(store, '_capture', lambda: ({'snapshot_id':'test','accounts':{'claude':a}}, {'gpt':('k','s')}))
-    monkeypatch.setattr(module, 'env_values', lambda: {})
-    def collect(directory, config, keys=None):
+    def claim(config, directory, packet_id=None, **kwargs):
         write(directory/'packet.json', {'snapshot_id':'test'})
-        return {'snapshot_id':'test'}
-    monkeypatch.setattr(module, 'collect', collect)
+        return {'packet_id':'p1','packet_sha256':'h','frozen_at':'2026-10-10T00:00:00+00:00','age_seconds':1.0}
+    monkeypatch.setattr(module.packet_broker, 'claim', claim)
     calls = []
     monkeypatch.setattr(module, 'run_model', lambda *args, **kwargs: calls.append(args))
     monkeypatch.setattr(module, 'external_reference', lambda: {'snapshot_id':'test'})

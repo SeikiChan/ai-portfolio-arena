@@ -53,16 +53,10 @@ def digest(path):
 
 
 def env_values():
-    # Parse only the local data credentials; never execute or print .env content.
-    values = {}
-    path = ROOT / ".env"
-    if path.exists():
-        for line in path.read_text(encoding="utf-8-sig").splitlines():
-            match = re.match(r"^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$", line)
-            if match:
-                values[match[1]] = match[2].strip("\"'")
-    return {k: os.environ.get(k) or values.get(k) for k in
-            ("APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "FMP_API_KEY")}
+    # Shared GET-only market-data credentials. Resolution and provenance live in credentials.py so
+    # that every workspace reads one pair; this wrapper keeps the original name for all callers.
+    from .credentials import market_data_keys
+    return market_data_keys()
 
 
 def external_reference():

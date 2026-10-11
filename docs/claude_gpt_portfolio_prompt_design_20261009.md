@@ -1,5 +1,7 @@
 # AI 投资研究系统 Prompt 设计研究
 
+> 本文记录的是 2026-10-09 research-only 原型。2026-10-10 用户改为 Claude 与 Codex 分别自动交易各自 Alpaca Paper 账户；当前订单边界、调用关系与频率以 `ENGINE_CONTRACT.md` 为准。本文旧的“不会下单”指令只适用于历史研究轮次。
+
 日期：2026-10-09（控制台轮次时间戳为 2026-10-10Z）｜性质：设计研究与可粘贴文本｜配套：`claude_gpt_portfolio_team_implementation_guide_20261009.md`
 
 依据：`ai_portfolios/models.py`、`config.json`、`console_store.py` 当前代码（observed）；`reports/ai_paper_console/rounds/` 已完成的 3 次模型调用（observed）；收益相关结论：unknown，本文不涉及。
