@@ -1,4 +1,5 @@
 from copy import deepcopy
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -333,3 +334,43 @@ def test_bench_scores_unfaithful_quotes_and_retyped_numbers():
     # "900.07" is a retyped packet-free number; "20 天" and "12%" are the model's own words.
     assert metrics["bare_numbers_in_prose"] == 1
     assert metrics["machine_checkable_exits"] == 1 and metrics["positive_positions"] == 1
+
+
+def test_both_cli_executables_resolve_without_relying_on_path(monkeypatch):
+    import shutil as shutil_module
+
+    from ai_portfolios import models
+    # A spawned process may not inherit the PATH an interactive shell has; a round must not fail as
+    # "executable unavailable" when the tool is installed and logged in.
+    monkeypatch.setattr(shutil_module, "which", lambda name: None)
+    for name in ("claude", "codex"):
+        resolved = models.executable(name)
+        assert resolved.endswith(".exe") and Path(resolved).exists()
+
+
+def test_unknown_executable_still_reports_unavailable(monkeypatch):
+    import shutil as shutil_module
+
+    from ai_portfolios import models
+    monkeypatch.setattr(shutil_module, "which", lambda name: None)
+    with pytest.raises(RuntimeError, match="unavailable"):
+        models.executable("grok")
+
+
+@pytest.mark.parametrize("stdout,kind", [
+    ('{"type":"error","message":"You’ve hit your usage limit. Upgrade to Pro or purchase more credits."}',
+     "usage_limit_reached"),
+    ('{"result":"Failed to authenticate: OAuth session expired and could not be refreshed"}',
+     "authentication_required"),
+    ('{"type":"error","error":{"message":"rate limit exceeded, try again later"}}', "usage_limit_reached"),
+    ('{"type":"error","message":"model not found"}', "cli_error"),
+    ('not json at all', "cli_error"),
+    ('', "cli_error"),
+])
+def test_failure_kind_separates_retry_later_from_broken(stdout, kind):
+    from ai_portfolios.models import classify_failure
+
+    result = classify_failure("gpt", stdout, {})
+    assert result["failure_kind"] == kind
+    # A quota pause and an expired login both need a human, so both carry a hint; a defect does not.
+    assert ("error_hint" in result) is (kind != "cli_error")
