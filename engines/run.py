@@ -148,6 +148,9 @@ def run(engine_id, mandate=None, packet_id=None, config=None, output_root=None, 
         write(directory / "round.json", job, exclusive=True)
 
         try:
+            if engine_id == "codex_engine":
+                from .codex_engine.feedback import history
+                write(directory / "feedback_input.json", history(rounds_root, experiment_id, job["started_at"]), exclusive=True)
             decision_packet = packet
             if research_enabled:
                 # A research failure still leaves a sealable failed round; no portfolio is fabricated.
@@ -177,6 +180,14 @@ def run(engine_id, mandate=None, packet_id=None, config=None, output_root=None, 
         job["model_statuses"] = statuses
         job["status"] = "completed" if statuses[provider] == "validated" else "failed"
         job["completed_at"] = stamp()
+        if engine_id == "codex_engine":
+            from .codex_engine.feedback import score_result, POLICY
+            write(directory / "feedback_result.json", {"round_id": round_id, "experiment_id": experiment_id,
+                  "policy": POLICY, "classification": "derived", "reward_policy_classification": "assumption",
+                  "input_file": f"{provider}_status.json", "source_sha256": digest(directory / f"{provider}_status.json"),
+                  "row_count": 1, "observation_start": job["started_at"], "observation_end": job["completed_at"],
+                  "calculation_script": "engines/codex_engine/feedback.py",
+                  **score_result(read(directory / f"{provider}_status.json"))}, exclusive=True)
         write(directory / "round.json", job)
         receipt = {"round_id": round_id, "engine_id": engine.engine_id, "packet_id": pointer["packet_id"],
                    "packet_sha256": pointer["packet_sha256"], "status": job["status"],
