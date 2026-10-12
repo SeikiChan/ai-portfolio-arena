@@ -13,13 +13,17 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import execution, packet_broker
-from .common import APP, ROOT, read, stamp, write
+from .common import APP, ROOT, now, parse_time, read, stamp, write
 from .credentials import paper_credentials
 from .paper_accounts import account_identity
 from .console_store import load_prompts
 
 EASTERN = ZoneInfo("America/New_York")
-RUN_AT = time(9, 30)  # user mandate: start research at the regular-session open.
+RUN_AT = time(9, 30)  # the regular-session open; see OPEN_GRACE for the boundary race.
+# 09:30 is a boundary, not an interval. The task can start a moment before the broker clock
+# flips, and a date claimed as closed is never retried - a one-second race would silently
+# swallow an entire trading day. Wait across the boundary instead of claiming it.
+OPEN_GRACE_SECONDS = 600
 ENGINES = ("claude_engine", "codex_engine")
 STATE_ROOT = ROOT / "reports" / "auto_trader"
 POLL_SECONDS = 30
@@ -40,6 +44,31 @@ def _open_for_both():
         raise ValueError("Claude 与 Codex 绑定到了同一个 Alpaca Paper 账户；两队交易已停止")
 
 
+def _seconds_until(moment):
+    return (parse_time(moment) - now()).total_seconds() if moment else None
+
+
+def _wait_for_open(grace=OPEN_GRACE_SECONDS):
+    """None once both accounts see an open session, else the closed message.
+
+    Waits only when the open is actually imminent, so a weekend still answers on the first check.
+    """
+    waited = 0
+    while True:
+        try:
+            _open_for_both()
+            return None
+        except ValueError as exc:
+            if "当前不在美股常规交易时段" not in str(exc):
+                raise
+            clock = execution.session_open(paper_credentials(only="claude")["claude"], require_open=False)
+            remaining = _seconds_until(clock.get("next_open"))
+            if remaining is None or waited >= grace or remaining > grace - waited:
+                return str(exc)
+            wait.sleep(min(POLL_SECONDS, max(1, remaining + 1)))
+            waited += POLL_SECONDS
+
+
 def run_daily(trading_date=None):
     """Run once per Eastern trading date; a claimed date is never retried automatically."""
     trading_date = trading_date or __import__("datetime").datetime.now(EASTERN).date().isoformat()
@@ -54,13 +83,10 @@ def run_daily(trading_date=None):
                       for engine_id, provider in providers.items()}
 
     # Avoid collecting data on weekends/holidays. Alpaca's clock is the source of truth.
-    try:
-        _open_for_both()
-    except ValueError as exc:
-        if "当前不在美股常规交易时段" not in str(exc):
-            raise
+    closed = _wait_for_open()
+    if closed:
         state = {"trading_date": trading_date, "status": "market_closed", "checked_at": stamp(),
-                 "error": str(exc), "orders_submitted": False}
+                 "error": closed, "orders_submitted": False}
         write(state_file, state, exclusive=True)
         return state
     state = {"trading_date": trading_date, "status": "started", "started_at": stamp(),

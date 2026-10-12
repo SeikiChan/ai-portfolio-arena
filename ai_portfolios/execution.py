@@ -26,6 +26,7 @@ Deliberate limits for this first version:
 from __future__ import annotations
 
 import math
+import time as wait
 from datetime import timedelta
 from pathlib import Path
 
@@ -39,6 +40,11 @@ LIMIT_BUFFER = 0.002        # assumption: 20bp past the touch. Caps the price wi
 MIN_TRADE_FRACTION = 0.005  # assumption: skip rebalances below 0.5% of equity, so drift is not churn.
 MAX_QUOTE_AGE_SECONDS = 120
 MAX_PRICE_DEVIATION = 0.2   # Refuse a quote this far from the packet's last close: gapped or bad.
+# The local clock runs a fraction of a second behind the exchange, so a quote that just arrived can
+# carry a timestamp a shade ahead of now(). Waiting for that instant to actually pass is honest;
+# clamping a negative age to zero, or rewriting the timestamp, would be fabricating freshness.
+# Beyond this the machine clock is genuinely wrong and no amount of waiting fixes it.
+MAX_CLOCK_SKEW_SECONDS = 2.0
 TIF = "day"
 
 
@@ -47,7 +53,7 @@ def assert_paper():
         raise ValueError("券商地址不是 Paper 域名，已拒绝提交")
 
 
-def session_open(credentials, getter=None):
+def session_open(credentials, getter=None, require_open=True):
     getter = getter or requests.get
     key, secret = credentials
     response = getter(BASE + "/v2/clock", headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
@@ -55,7 +61,7 @@ def session_open(credentials, getter=None):
     if response.status_code != 200:
         raise ValueError(f"无法读取交易时段：HTTP {response.status_code}")
     clock = response.json()
-    if not clock.get("is_open"):
+    if require_open and not clock.get("is_open"):
         raise ValueError(f"当前不在美股常规交易时段（下次开市 {clock.get('next_open')}），不提交委托")
     return clock
 
@@ -89,6 +95,22 @@ def quote_metrics(symbol, quote, last_close, at, max_age_seconds=MAX_QUOTE_AGE_S
     if abs(mid / last_close - 1) > MAX_PRICE_DEVIATION:
         raise ValueError(f"{symbol} 现价与冻结收盘价相差超过 {MAX_PRICE_DEVIATION:.0%}，暂停执行并人工核对")
     return {"bid": bid, "ask": ask, "mid": mid, "quote_age_seconds": round(age, 3)}
+
+
+def settle_quotes(quote_map, at, sleep=None):
+    """Wait out sub-second clock skew so a fresh quote is not mistaken for a future one."""
+    sleep = sleep or wait.sleep
+    stamps = [parse_time(q["t"]) for q in quote_map.values() if isinstance(q, dict) and q.get("t")]
+    if not stamps:
+        return at
+    ahead = (max(stamps) - at).total_seconds()
+    if ahead <= 0:
+        return at
+    if ahead > MAX_CLOCK_SKEW_SECONDS:
+        raise ValueError(f"报价时间比本机时间快 {ahead:.1f} 秒，超出可接受的时钟偏差；"
+                         "请核对系统时间同步，本轮不执行")
+    sleep(ahead + 0.25)
+    return now()
 
 
 def limit_for(side, metrics):
@@ -250,6 +272,7 @@ def execute(provider, round_directory, config, submit_orders=False, getter=None,
     if missing and submit_orders:
         raise ValueError(f"缺少报价的标的：{', '.join(missing)}；整份计划暂不执行")
     session = session_open(credentials, getter=getter) if submit_orders else {"is_open": None, "note": "dry run 不检查时段"}
+    at = settle_quotes(quote_map, at)
     try:
         proposal = plan(decision, snapshot["account"], snapshot["positions"], quote_map, closes, config, at)
     except ValueError:
