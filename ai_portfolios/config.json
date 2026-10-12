@@ -8,6 +8,7 @@
   "max_weight": 0.2,
   "max_invested": 0.95,
   "min_invested": 0.5,
+  "cadence_version": "opening-0930-et-v1",
   "quote_feed": "iex",
   "max_quote_age_seconds": 90,
   "minimum_execution_delay_seconds": 60,

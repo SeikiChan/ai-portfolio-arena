@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 import time as wait
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -18,7 +19,7 @@ from .paper_accounts import account_identity
 from .console_store import load_prompts
 
 EASTERN = ZoneInfo("America/New_York")
-RUN_AT = time(10, 0)  # assumption: wait 30 minutes after the regular-session open.
+RUN_AT = time(9, 30)  # user mandate: start research at the regular-session open.
 ENGINES = ("claude_engine", "codex_engine")
 STATE_ROOT = ROOT / "reports" / "auto_trader"
 POLL_SECONDS = 30
@@ -76,7 +77,7 @@ def run_daily(trading_date=None):
     state.update(packet_id=pointer["packet_id"], packet_sha256=pointer["packet_sha256"], packet_frozen_at=pointer["frozen_at"])
     write(state_file, state)
 
-    for engine_id in ENGINES:
+    def launch(engine_id):
         provider = providers[engine_id]
         mandate_directory = STATE_ROOT / "mandates" / trading_date
         mandate_directory.mkdir(parents=True, exist_ok=True)
@@ -103,15 +104,22 @@ def run_daily(trading_date=None):
                 execution_status = "partial_failure"
             else:
                 execution_status = exec_result.get("mode", "unknown")
-            state["engines"][engine_id] = {"exit_code": proc.returncode,
+            return {"exit_code": proc.returncode,
                 "round_id": details.get("round_id"), "status": details.get("status"),
                 "execution": exec_result,
                 "execution_status": execution_status,
                 "error": (proc.stderr or (proc.stdout if proc.returncode else ""))[-1000:] or None}
         except subprocess.TimeoutExpired:
-            state["engines"][engine_id] = {"status": "interrupted", "error": "daily engine process timed out"}
-        state["updated_at"] = stamp()
-        write(state_file, state)
+            return {"status": "interrupted", "error": "daily engine process timed out"}
+        except OSError as exc:
+            return {"status": "failed", "error": type(exc).__name__}
+
+    with ThreadPoolExecutor(max_workers=len(ENGINES)) as pool:
+        pending = {pool.submit(launch, engine_id): engine_id for engine_id in ENGINES}
+        for future in as_completed(pending):
+            state["engines"][pending[future]] = future.result()
+            state["updated_at"] = stamp()
+            write(state_file, state)
 
     successes = sum(row.get("status") == "completed" and row.get("execution_status") not in
                     {"failed", "submission_unknown", "partial_failure"}
