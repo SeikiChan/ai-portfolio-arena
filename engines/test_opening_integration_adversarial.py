@@ -74,8 +74,12 @@ def result(status="completed"):
         "execution": {"mode": "paper", "results": []}}), stderr="")
 
 
-def test_schedule_is_regular_session_open():
-    assert auto_trader.RUN_AT == time(9, 30)
+def test_schedule_waits_out_the_opening_minutes():
+    """Inside the session, deliberately not at the bell: the opening auction's imbalance and the
+    worst IEX quote staleness both land in the first minutes, and one stale quote stops the whole
+    plan rather than its own leg."""
+    assert auto_trader.RUN_AT == time(9, 35)
+    assert auto_trader.RUN_AT > time(9, 30)
 
 
 def test_both_engines_start_concurrently_with_same_packet(tmp_path, monkeypatch):
@@ -94,7 +98,7 @@ def test_both_engines_start_concurrently_with_same_packet(tmp_path, monkeypatch)
     state = auto_trader.run_daily("2026-10-12")
     assert set(started) == set(auto_trader.ENGINES)
     assert state["status"] == "completed"
-    assert state["schedule_time_et"] == "09:30"
+    assert state["schedule_time_et"] == "09:35"
     freezer.assert_called_once()
 
 
