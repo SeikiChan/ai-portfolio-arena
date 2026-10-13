@@ -149,6 +149,39 @@ def test_export_publishes_one_entry_per_model(tmp_path, monkeypatch):
             assert field in row
 
 
+def test_published_equity_marks_are_observed_and_versioned(tmp_path, monkeypatch):
+    directory = round_dir(tmp_path, experiment_id="paper-v2")
+    account_file = directory / "account_snapshot" / "claude_account.json"
+    write(account_file, {"equity": "10042.75", "account_number": "SECRET"})
+    job = __import__("json").loads((directory / "round.json").read_text(encoding="utf-8"))
+    job["account_snapshot"]["files"][account_file.name] = digest(account_file)
+    write(directory / "round.json", job)
+    receipt = __import__("json").loads((directory / "receipt.json").read_text(encoding="utf-8"))
+    receipt["files"]["round.json"] = digest(directory / "round.json")
+    write(directory / "receipt.json", receipt)
+    monkeypatch.setattr(contract, "result_root", lambda engine_id: directory.parent)
+
+    export = publish.build()
+    mark = export["equity_history"][0]
+    assert mark["equity"] == 10042.75 and mark["experiment_id"] == "paper-v2"
+    assert mark["at"] == "20261010T000000Z"
+    assert "SECRET" not in __import__("json").dumps(export)
+
+
+def test_research_trace_excludes_model_input_and_bounds_tool_excerpt(tmp_path):
+    directory = tmp_path / "round"
+    directory.mkdir()
+    write(directory / "research_00_gpt_prompt.json", {"prompt": "private account input"})
+    write(directory / "research_00_gpt_response.json", {"done": False, "actions": [{"tool": "search_web", "query": "earnings"}]})
+    write(directory / "research_01_request.json", {"action": {"tool": "search_web", "query": "earnings"}})
+    write(directory / "research_01_result.json", {"status": "ok", "classification": "observed", "text": "x" * 5000})
+
+    trace = publish.research_trace(directory, "gpt")
+    assert [row["kind"] for row in trace] == ["model", "tool"]
+    assert len(trace[1]["text"]) == 4000 and trace[1]["excerpt_truncated"] is True
+    assert "private account input" not in __import__("json").dumps(trace)
+
+
 def test_export_never_carries_secrets_or_full_account_identity(tmp_path, monkeypatch):
     # The prompt body has to be in place before round_dir seals the receipt: rewriting a file
     # afterwards is exactly the tampering validate_round now rejects.
