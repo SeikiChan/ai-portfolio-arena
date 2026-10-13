@@ -175,9 +175,10 @@ def test_research_trace_excludes_model_input_and_bounds_tool_excerpt(tmp_path):
     write(directory / "research_00_gpt_response.json", {"done": False, "actions": [{"tool": "search_web", "query": "earnings"}]})
     write(directory / "research_01_request.json", {"action": {"tool": "search_web", "query": "earnings"}})
     write(directory / "research_01_result.json", {"status": "ok", "classification": "observed", "text": "x" * 5000})
+    write(directory / "research_01_gpt_response.json", {"done": True, "actions": []})
 
     trace = publish.research_trace(directory, "gpt")
-    assert [row["kind"] for row in trace] == ["model", "tool"]
+    assert [row["kind"] for row in trace] == ["model", "tool", "model"]
     assert len(trace[1]["text"]) == 4000 and trace[1]["excerpt_truncated"] is True
     assert "private account input" not in __import__("json").dumps(trace)
 
