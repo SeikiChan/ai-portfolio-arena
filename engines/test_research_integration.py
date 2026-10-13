@@ -106,12 +106,21 @@ def test_disable_research_creates_distinct_experiment():
     assert disabled != enabled and disabled.startswith("packet-only-v1-")
 
 
-def test_codex_uses_own_versioned_mandate_without_changing_claude_default():
-    mandate = run.default_mandate("codex_engine")
-    assert mandate.startswith("委托版本：codex-capital-growth-v2-20261011")
-    assert run.default_mandate("claude_engine") == run.DEFAULT_MANDATE
+def test_each_engine_ships_its_own_mandate_and_neither_leaks_into_the_other():
+    """Both engines now use run.py's default_mandate hook, so the shared fallback reaches neither.
+
+    claude_engine used to fall through to run.DEFAULT_MANDATE because it declared nothing; it now
+    ships engines/claude_engine/mandate.md. What still has to hold is independence: one team's
+    mandate must never become the other's, and the shared fallback must not silently stand in for
+    either, which is what made this assertion worth keeping.
+    """
+    codex = run.default_mandate("codex_engine")
+    claude = run.default_mandate("claude_engine")
+    assert codex.startswith("委托版本：codex-capital-growth-v2-20261011")
+    assert claude != codex
+    assert run.DEFAULT_MANDATE not in (codex, claude)
     engine = run.registry.get("codex_engine")
-    assert research.identity(engine, {}, mandate) != research.identity(engine, {}, run.DEFAULT_MANDATE)
+    assert research.identity(engine, {}, codex) != research.identity(engine, {}, run.DEFAULT_MANDATE)
 
 
 def test_research_is_enabled_only_for_explicitly_selected_team():

@@ -34,6 +34,26 @@ def engine_timeout(engine_id, config):
     return config["model_timeout_seconds"] + 180 + (TIME_BUDGET if enabled(engine_id, config) else 0)
 
 
+def _shipped_mandates(mandates, providers):
+    """Whether each engine ran the mandate it ships with, or one the console has since edited.
+
+    Neither answer is wrong - the console exists so a mandate can change without a commit - but an
+    edit to engines/<engine>/mandate.* on its own changes nothing about what runs here, and that
+    silence is worth breaking in the one file somebody reads the morning after.
+    """
+    from engines import registry   # engines imports ai_portfolios; keep the dependency one-way
+
+    verdict = {}
+    for engine_id, provider in providers.items():
+        shipped = getattr(registry.get(engine_id), "default_mandate", None) \
+            if engine_id in registry.declared() else None
+        try:
+            verdict[engine_id] = shipped().strip() == mandates[provider].strip() if shipped else None
+        except (OSError, ValueError):
+            verdict[engine_id] = None
+    return verdict
+
+
 def _open_for_both():
     account_ids = {}
     for provider in ("claude", "gpt"):
@@ -91,7 +111,7 @@ def run_daily(trading_date=None):
         return state
     state = {"trading_date": trading_date, "status": "started", "started_at": stamp(),
              "schedule_time_et": RUN_AT.strftime("%H:%M"), "engines": {},
-             "mandate_sha256": mandate_hashes,
+             "mandate_sha256": mandate_hashes, "mandate_matches_engine_default": _shipped_mandates(mandates, providers),
              "classification": "assumption: one automatic Paper trading cycle per session"}
     write(state_file, state, exclusive=True)
     try:

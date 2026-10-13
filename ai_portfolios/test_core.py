@@ -331,6 +331,106 @@ def test_a_rejected_quote_says_which_position_and_which_record():
     assert "AAPL evidence_quotes[0]" in message and "news:AAPL:1" in message
 
 
+REAL_EQUITY = 10038.74   # the claude Paper book on 2026-10-13
+
+
+def small_book(holdings=None):
+    """A book the real size. Granularity is a function of equity, so equity is what has to be real:
+    one expensive share is a double-digit slice of $10,038 and nothing at all on $100k."""
+    book = initial_book(REAL_EQUITY)
+    if holdings:
+        book["holdings"] = dict(holdings)
+        book["cash"] = REAL_EQUITY - sum(h["shares"] * h["last_mark"] for h in holdings.values())
+    return book
+
+
+def real_book():
+    """That book as it actually stood: $4,197.89 cash and eight holdings."""
+    return small_book({"MSFT": {"shares": 2.0, "last_mark": 546.51}, "GOOGL": {"shares": 3.0, "last_mark": 356.66},
+                       "NVDA": {"shares": 4.0, "last_mark": 224.625}, "V": {"shares": 2.0, "last_mark": 394.06},
+                       "WMT": {"shares": 5.0, "last_mark": 114.33}, "AMZN": {"shares": 2.0, "last_mark": 259.76},
+                       "XOM": {"shares": 4.0, "last_mark": 173.35}, "PLTR": {"shares": 1.0, "last_mark": 206.66}})
+
+
+def priced_packet(price):
+    data = packet()
+    data.update(snapshot_id="s1", errors=[])
+    data["features"] = [{"symbol": "AAPL", "last_close": price}]
+    return data
+
+
+def test_the_book_under_test_is_the_size_the_defect_needed():
+    from ai_portfolios.models import book_equity, share_weights
+    # Marked from eight real holdings plus real cash, and from the all-cash stand-in: same equity.
+    assert book_equity(real_book()) == pytest.approx(REAL_EQUITY, abs=0.5)
+    assert real_book()["cash"] == pytest.approx(4197.89, abs=0.5)
+    assert book_equity(small_book()) == pytest.approx(REAL_EQUITY, abs=0.5)
+    # One LLY-priced share really is 11.3% of it, and one cheap share is nothing.
+    assert share_weights(priced_packet(1137.90), real_book())["AAPL"] == pytest.approx(0.1133, abs=0.001)
+    assert share_weights(priced_packet(20.0), real_book())["AAPL"] == pytest.approx(0.002, abs=0.001)
+
+
+def test_a_name_cannot_be_opened_below_one_whole_share():
+    """2026-10-13, measured: the answer asked for LLY at 6% and COST at 5% on a $10,035 book where
+    one share is 11.3% and 9.5%. Both priced out to half a share, the executor skipped both, and a
+    decision reading 84% invested would have reached 59%. The floor was counting exposure the
+    account could not take on, so the number it guarded was not the number that existed.
+    """
+    book = small_book()
+    plan = decision()
+    plan["positions"][0]["target_weight"] = 0.06          # 6% of a 10,035 book is 602
+    with pytest.raises(ValueError, match="Unreachable opening weight on AAPL"):
+        validate(plan, CONFIG, priced_packet(1137.90), book)   # one LLY-sized share is 11.3%
+
+
+def test_the_rejection_gives_the_number_needed_to_fix_it():
+    plan = decision()
+    plan["positions"][0]["target_weight"] = 0.06
+    with pytest.raises(ValueError) as caught:
+        validate(plan, CONFIG, priced_packet(1137.90), small_book())
+    message = str(caught.value)
+    assert "0.53 of one share" in message and "11.3% of this book" in message
+
+
+def test_one_whole_share_is_enough_to_open_a_name():
+    plan = decision()
+    plan["positions"][0]["target_weight"] = 0.12   # one share is 11.3%
+    assert validate(plan, CONFIG, priced_packet(1137.90), small_book())
+
+
+def test_a_held_name_may_be_trimmed_by_less_than_a_share():
+    # Granularity blocks opening a name, never adjusting one that exists: a skipped trim leaves the
+    # position standing at its current weight, which is drift, not absence.
+    book = small_book({"AAPL": {"shares": 1.0, "last_mark": 1137.90}})
+    plan = decision()
+    plan["positions"][0]["action"] = "trim"
+    plan["positions"][0]["target_weight"] = 0.02
+    assert validate(plan, CONFIG, priced_packet(1137.90), book)
+
+
+def test_a_zero_weight_watch_item_is_never_called_unreachable():
+    plan = decision()
+    plan["positions"][0]["action"] = "watch"
+    plan["positions"][0]["target_weight"] = 0.0
+    assert validate(plan, CONFIG, priced_packet(1137.90), small_book())
+
+
+def test_a_cheap_share_imposes_no_meaningful_floor():
+    plan = decision()
+    plan["positions"][0]["target_weight"] = 0.01
+    assert validate(plan, CONFIG, priced_packet(20.0), small_book())
+
+
+def test_the_model_is_shown_the_floor_it_is_judged_against():
+    """The instruction has always said min_invested lives in INPUT.limits. It did not."""
+    from ai_portfolios.models import build_prompt
+    body = build_prompt(priced_packet(100.0), small_book(), REAL_CONFIG, "", "alpaca_paper")
+    from ai_portfolios.models import book_equity
+    limits = json.loads(body.split(chr(10) + "INPUT:" + chr(10), 1)[1])["limits"]
+    assert limits["min_invested"] == REAL_CONFIG["min_invested"]
+    assert limits["one_share_weight"]["AAPL"] == pytest.approx(100.0 / book_equity(small_book()), rel=1e-3)
+
+
 def test_unattributed_macro_statement_is_recorded_not_rejected():
     # Losing a trading day is worse than an untraceable sentence that stays visible in the archive.
     plan = decision()

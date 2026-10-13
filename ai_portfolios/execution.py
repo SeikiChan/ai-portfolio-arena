@@ -217,10 +217,37 @@ def plan(decision, account, positions, quote_map, closes, config, at, tradable=T
             affordable.append(leg)
         else:
             deferred.append({**leg, "reason": "现金不足；卖出成交后下一轮重新规划，不缩小权重替模型做决定"})
-    return {"equity": equity, "cash": cash, "orders": sells + sorted(affordable, key=lambda leg: leg["symbol"]),
+    orders = sells + sorted(affordable, key=lambda leg: leg["symbol"])
+    return {"equity": equity, "cash": cash, "orders": orders,
             "deferred": deferred, "skipped": skipped, "planned_at": stamp(), "tradable": tradable,
             "no_op": sorted({p["symbol"] for p in decision["positions"]} - actionable(decision, positions)),
+            "exposure": exposure(targets, held, orders, quote_map, equity),
             "classification": {"quotes": "observed", "limit_prices": "derived", "fills": "unknown until the broker reports them"}}
+
+
+def exposure(targets, held, orders, quote_map, equity):
+    """What the decision asked for against what these orders can actually reach.
+
+    Whole-share granularity means a target and a book are different things: on 2026-10-13 a decision
+    reading 84% invested priced out to 59%, because two names were asked for at less than one share
+    and several increments rounded to zero. The validator now refuses to open a name below one share,
+    which closes the large half of that gap. The rest is drift on existing holdings, and recording it
+    is the only way anyone finds out that a stated weight and a held weight have parted company.
+    """
+    filled = {}
+    for leg in orders:
+        filled[leg["symbol"]] = filled.get(leg["symbol"], 0.0) + leg["qty"] * (1 if leg["side"] == "buy" else -1)
+    reached = 0.0
+    for symbol in set(targets) | set(held):
+        mid = quote_map.get(symbol, {})
+        price = (number(mid.get("bp")) or 0) + (number(mid.get("ap")) or 0)
+        price = price / 2 if price else None
+        shares = (held.get(symbol) or 0.0) + filled.get(symbol, 0.0)
+        if price and shares > 0:
+            reached += shares * price / equity
+    intended = sum(weight for weight in targets.values() if weight > 0)
+    return {"intended_invested": round(intended, 4), "reachable_invested": round(reached, 4),
+            "shortfall": round(intended - reached, 4)}
 
 
 def client_order_id(round_id, provider, symbol, side):
