@@ -19,10 +19,14 @@ from .paper_accounts import account_identity
 from .console_store import load_prompts
 
 EASTERN = ZoneInfo("America/New_York")
-RUN_AT = time(9, 30)  # the regular-session open; see OPEN_GRACE for the boundary race.
-# 09:30 is a boundary, not an interval. The task can start a moment before the broker clock
-# flips, and a date claimed as closed is never retried - a one-second race would silently
-# swallow an entire trading day. Wait across the boundary instead of claiming it.
+RUN_AT = time(9, 35)  # five minutes into the regular session, not at the bell.
+# Why not 09:30. Two things are at their worst in the first minutes: the opening auction's
+# imbalance, which is priced into whatever limit we cross, and IEX quote staleness on the
+# thinner names - and a quote older than MAX_QUOTE_AGE_SECONDS stops the entire plan, not
+# just its own leg. Five minutes costs five minutes of drift and buys margin on both.
+# The grace below still matters: a late or shortened open means the session may not be
+# running yet even at 09:35, and a date once claimed as closed is never retried, so a
+# clock that flips a moment late would silently swallow a whole trading day.
 OPEN_GRACE_SECONDS = 600
 ENGINES = ("claude_engine", "codex_engine")
 STATE_ROOT = ROOT / "reports" / "auto_trader"
