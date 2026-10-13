@@ -81,21 +81,32 @@ def account_mark(directory, provider, job):
 def research_trace(directory, provider):
     """Publish model research actions and bounded public tool excerpts, never prompt inputs."""
     turns = []
-    for path in sorted(directory.glob(f"research_*_{provider}_response.json")):
-        turn = read(path)
-        turns.append({"kind": "model", "step": path.stem.split("_")[1],
-                      "done": turn.get("done"), "actions": turn.get("actions", [])})
-    for path in sorted(directory.glob("research_*_request.json")):
+    requests = iter(sorted(directory.glob("research_*_request.json")))
+
+    def tool_step(path):
         result_path = path.with_name(path.name.replace("_request.json", "_result.json"))
         request = read(path)
         result = read(result_path) if result_path.exists() else {}
         excerpt = result.get("text") or ""
-        turns.append({"kind": "tool", "step": path.stem.split("_")[1],
-                      "action": request.get("action", {}), "status": result.get("status", "unknown"),
-                      "classification": result.get("classification", "unknown"),
-                      "text": excerpt[:4000], "excerpt_truncated": len(excerpt) > 4000,
-                      "url": result.get("url"), "source_sha256": result.get("source_sha256")})
-    return sorted(turns, key=lambda row: (int(row["step"]), row["kind"] != "model"))
+        return {"kind": "tool", "step": path.stem.split("_")[1],
+                "action": request.get("action", {}), "status": result.get("status", "unknown"),
+                "classification": result.get("classification", "unknown"),
+                "text": excerpt[:4000], "excerpt_truncated": len(excerpt) > 4000,
+                "url": result.get("url"), "source_sha256": result.get("source_sha256")}
+
+    # The tool calls are numbered globally; model planning turns start at 00. Each
+    # planning turn's actions run before the next model turn sees their results.
+    for path in sorted(directory.glob(f"research_*_{provider}_response.json")):
+        turn = read(path)
+        actions = turn.get("actions") or []
+        turns.append({"kind": "model", "step": path.stem.split("_")[1],
+                      "done": turn.get("done"), "actions": actions})
+        for _ in actions:
+            request_path = next(requests, None)
+            if request_path is not None:
+                turns.append(tool_step(request_path))
+    turns.extend(tool_step(path) for path in requests)
+    return turns
 
 
 def decision_evidence(directory, decision):
