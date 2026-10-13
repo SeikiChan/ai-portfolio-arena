@@ -63,6 +63,7 @@ function decision(round) {
 function research(round) {
   const host=el("div",null,"tab-body");
   host.append(el("p","以下是已归档的模型研究动作与公开工具结果。内部推理不可见，最终原始回复可在下方展开。","muted"));
+  if(round.research_enabled&&round.research_trace?.length)host.append(el("p","历史指令里的“没有工具”仅指最后生成组合的那次调用；本轮前置研究实际使用了下面这些联网工具。旧轮次原文保持不变。","muted"));
   if(!round.research_trace?.length)host.append(el("p","本轮没有保存公开研究工具对话。","muted"));
   for(const step of round.research_trace||[]){
     const card=el("article",null,"trace "+step.kind);
@@ -74,7 +75,7 @@ function research(round) {
       card.append(el("small",(step.classification||"unknown")+" · 来源哈希 "+(step.source_sha256||"未提供")));
     }host.append(card);
   }
-  for(const [label,value] of [["最终原始回复",round.response||round.error||"没有模型回复"],["发送给模型的指令（账户输入已省略）",round.full_prompt||"没有指令存档"]]){
+  for(const [label,value] of [["最终原始回复",round.response||round.error||"没有模型回复"],["最终决策阶段的指令（前置研究可用工具；账户输入已省略）",round.full_prompt||"没有指令存档"]]){
     const details=el("details",null,"transcript");details.append(el("summary",label),el("pre",value));host.append(details);
   }
   return host;
