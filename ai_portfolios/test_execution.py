@@ -402,3 +402,21 @@ def test_settling_runs_before_the_plan_is_priced(round_dir, monkeypatch):
     monkeypatch.setattr(execution, "settle_quotes", lambda q, at, sleep=None: calls.append(at) or at)
     execution.execute("claude", round_dir, CONFIG, submit_orders=False, getter=getter_for(), at=TIME)
     assert calls == [TIME]
+
+
+def test_live_quote_uses_clock_after_broker_reads(round_dir, monkeypatch):
+    # The account/quote requests may take over two seconds. Their fresh quote must
+    # not look future-dated against the timestamp captured at execute() entry.
+    job = read(round_dir / "round.json")
+    job.update(engine_id="codex_engine", providers=["gpt"])
+    write(round_dir / "round.json", job)
+    write(round_dir / "gpt_status.json", read(round_dir / "claude_status.json"))
+    times = iter((TIME, TIME + timedelta(seconds=2.2)))
+    monkeypatch.setattr(execution, "now", lambda: next(times))
+    fresh_quote = {"MSFT": quote(at=TIME + timedelta(seconds=2.1))}
+
+    record = execution.execute("gpt", round_dir, CONFIG, submit_orders=False,
+                               getter=getter_for(quotes=fresh_quote))
+
+    assert record["engine_id"] == "codex_engine" and record["mode"] == "dry_run"
+    assert record["plan"]["orders"][0]["symbol"] == "MSFT"

@@ -235,6 +235,7 @@ def submit(leg, credentials, round_id, provider, poster=None):
 
 def execute(provider, round_directory, config, submit_orders=False, getter=None, poster=None, at=None):
     assert_paper()
+    explicit_at = at is not None
     at = at or now()
     round_directory = Path(round_directory)
     job = read(round_directory / "round.json")
@@ -272,7 +273,9 @@ def execute(provider, round_directory, config, submit_orders=False, getter=None,
     if missing and submit_orders:
         raise ValueError(f"缺少报价的标的：{', '.join(missing)}；整份计划暂不执行")
     session = session_open(credentials, getter=getter) if submit_orders else {"is_open": None, "note": "dry run 不检查时段"}
-    at = settle_quotes(quote_map, at)
+    # Account, quote and market-clock requests take time. Compare fresh quotes to the
+    # clock after those requests, while preserving an explicitly supplied test time.
+    at = settle_quotes(quote_map, at if explicit_at else now())
     try:
         proposal = plan(decision, snapshot["account"], snapshot["positions"], quote_map, closes, config, at)
     except ValueError:
