@@ -23,13 +23,36 @@ def decision(positions=(("MSFT", 0.15),)):
             "injection_flags": [], "positions": [{"symbol": s, "target_weight": w} for s, w in positions]}
 
 
-def test_plan_converts_weights_to_whole_share_limit_orders():
+def test_plan_converts_weights_to_fractional_limit_orders():
+    """Every symbol in the universe is fractionable and Alpaca takes fractional qty on limit DAY
+    orders, so a weight is filled as asked. Truncating to 14 shares was the executor quietly
+    deciding on a smaller position than the one it was given."""
     proposal = execution.plan(decision(), account(), [], {"MSFT": quote()}, {"MSFT": 100.0}, CONFIG, TIME)
     leg = proposal["orders"][0]
     assert leg["side"] == "buy" and leg["symbol"] == "MSFT"
-    # 15% of 10,000 = 1,500 at a 100.30 limit -> 14 whole shares, never 14.95
-    assert leg["qty"] == 14 and leg["limit_price"] == pytest.approx(100.3)
-    assert float(leg["qty"]) == int(leg["qty"])
+    # 15% of 10,000 = 1,500 at a 100.30 limit -> 14.955..., not 14
+    assert leg["limit_price"] == pytest.approx(100.3)
+    assert leg["qty"] == pytest.approx(1500 / 100.3, rel=1e-9)
+    assert leg["notional"] == pytest.approx(1500, abs=0.01)
+
+
+def test_a_fractional_quantity_is_held_to_nine_decimals():
+    # Alpaca accepts nine; sending more would be rejected for precision, not for size.
+    proposal = execution.plan(decision(), account(), [], {"MSFT": quote()}, {"MSFT": 100.0}, CONFIG, TIME)
+    quantity = proposal["orders"][0]["qty"]
+    assert quantity == round(quantity, execution.QTY_PRECISION)
+
+
+def test_the_whole_requested_weight_is_reached_not_truncated():
+    """The defect this replaces, in numbers: a $10k book asked for ten names and reached 59% of
+    the 84% it wanted, because every increment was under one share of a $500 stock."""
+    targets = (("MSFT", 0.14), ("AAPL", 0.13), ("NVDA", 0.09))
+    quotes = {"MSFT": quote(bid=546.0, ask=547.0), "AAPL": quote(bid=341.0, ask=342.0),
+              "NVDA": quote(bid=227.0, ask=228.0)}
+    closes = {"MSFT": 546.5, "AAPL": 341.5, "NVDA": 227.5}
+    proposal = execution.plan(decision(positions=targets), account(), [], quotes, closes, CONFIG, TIME)
+    assert len(proposal["orders"]) == 3 and proposal["skipped"] == []
+    assert proposal["exposure"]["shortfall"] == pytest.approx(0.0, abs=0.005)
 
 
 def test_limit_price_sits_past_the_touch_on_each_side():
@@ -43,7 +66,7 @@ def test_exit_sells_the_whole_position_and_never_more():
     proposal = execution.plan(decision(positions=(("MSFT", 0.0),)), account(), positions,
                               {"MSFT": quote()}, {"MSFT": 100.0}, CONFIG, TIME)
     leg = proposal["orders"][0]
-    assert leg["side"] == "sell" and leg["qty"] == 14
+    assert leg["side"] == "sell" and leg["qty"] == 14.0
 
 
 def test_a_tiny_exit_is_still_executed_and_never_exceeds_the_shares_held():
@@ -57,16 +80,37 @@ def test_a_tiny_exit_is_still_executed_and_never_exceeds_the_shares_held():
 
 def test_a_tiny_rebalance_is_still_treated_as_drift():
     positions = [{"symbol": "MSFT", "qty": "3"}]
-    # Target 700 against a 300 position: 3 whole shares are buyable, but 400 is under the 500 minimum.
+    # Target 700 against a 300 position: now exactly buyable in fractions, but 400 is under the
+    # 500 minimum, and the minimum is about cost rather than about shares.
     proposal = execution.plan(decision(positions=(("MSFT", 0.007),)), account(equity="100000"), positions,
                               {"MSFT": quote()}, {"MSFT": 100.0}, CONFIG, TIME)
     assert proposal["orders"] == [] and "漂移" in proposal["skipped"][0]["reason"]
 
 
-def test_a_position_too_small_for_one_share_is_reported_separately():
+def test_a_position_too_small_to_be_worth_its_spread_is_still_skipped():
+    """Fractional shares remove the granularity floor, not the cost floor. 0.05% of equity is $5;
+    buying $5 of anything pays the spread for a position that cannot matter."""
     proposal = execution.plan(decision(positions=(("MSFT", 0.0005),)), account(), [],
                               {"MSFT": quote()}, {"MSFT": 100.0}, CONFIG, TIME)
-    assert proposal["orders"] == [] and "不足一股" in proposal["skipped"][0]["reason"]
+    assert proposal["orders"] == [] and "漂移" in proposal["skipped"][0]["reason"]
+
+
+def test_an_exit_sells_the_exact_fractional_position():
+    """A full exit sells the holding itself. Dividing a mid-valued delta by a touch price leaves a
+    crumb, and a crumb keeps a name the model has closed sitting in the book forever."""
+    positions = [{"symbol": "MSFT", "qty": "2.345678912"}]
+    proposal = execution.plan(decision(positions=(("MSFT", 0.0),)), account(), positions,
+                              {"MSFT": quote()}, {"MSFT": 100.0}, CONFIG, TIME)
+    leg = proposal["orders"][0]
+    assert leg["side"] == "sell" and leg["qty"] == 2.345678912
+
+
+def test_a_fractional_sell_never_exceeds_the_shares_held():
+    positions = [{"symbol": "MSFT", "qty": "1.5"}]
+    # Target 0 weight on a book whose equity implies a much larger sale than the position.
+    proposal = execution.plan(decision(positions=(("MSFT", 0.0),)), account(equity="100000"), positions,
+                              {"MSFT": quote()}, {"MSFT": 100.0}, CONFIG, TIME)
+    assert proposal["orders"][0]["qty"] == 1.5
 
 
 def test_short_position_in_the_account_stops_everything():

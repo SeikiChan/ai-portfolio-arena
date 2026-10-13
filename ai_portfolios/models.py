@@ -13,7 +13,7 @@ from pathlib import Path
 from .common import digest, finite, parse_time, stamp, write
 
 REASONING_EFFORT = "medium"
-INSTRUCTION_VERSION = "2026-10-13.v4-whole-share-reachability"
+INSTRUCTION_VERSION = "2026-10-13.v5-fractional-execution"
 ACTIONS = {"new", "add", "hold", "trim", "exit", "watch"}
 FLAT_ACTIONS = {"exit", "watch"}
 INVALIDATION_KINDS = {"price_below", "price_above", "news_event", "financial_event", "time"}
@@ -110,12 +110,9 @@ whole and that account does nothing that day. You are running a book, not review
 thin" is a reason to size small and say so, not a reason to stand aside - standing aside is unavailable.
 Cash above the floor is a position like any other and needs a named condition you are waiting for, specific
 enough that a future packet can show whether it happened.
-WHOLE SHARES ONLY. INPUT.limits.one_share_weight gives, per symbol, what a single share is worth as a
-fraction of this book. A name you do not already hold cannot be opened below that number: a 6% target where
-one share is 11% is 0.53 shares, the executor skips it, and the name never enters the book at all. Check that
-number before you size a new name. Open it at one share or more, or leave it at 0 and say why; a weight
-between those is rejected. On an existing holding the same granularity means small adjustments may not
-execute, which is a reason not to make them: untriggered fine-tuning is noise that costs real spread.
+FRACTIONAL SHARES. Orders are placed in fractional quantities, so any weight inside the limits is reachable
+and you never have to round a target to a share count. Very small adjustments are still suppressed as
+drift: an increment worth under 0.5% of the book pays a spread for a change that cannot matter.
 `action` is one of new / add / hold / trim / exit / watch; exit and watch require
 target_weight 0, the other four require a positive weight.
 `horizon_days` (1-365) is the day by which you expect to either still hold the name or re-review it. It is an
@@ -200,35 +197,6 @@ def quote_match(quote, item):
     if fold(quote) in fold(record):
         return "folded"
     return None
-
-
-def book_equity(previous):
-    """Marked equity from the same numbers the model is shown: cash plus holdings at last mark."""
-    total = float(previous.get("cash") or 0.0)
-    for holding in (previous.get("holdings") or {}).values():
-        shares, mark = holding.get("shares"), holding.get("last_mark")
-        if finite(shares) and finite(mark):
-            total += float(shares) * float(mark)
-    return total
-
-
-def share_weights(packet, previous):
-    """What one whole share of each symbol is worth as a fraction of the book.
-
-    This account buys whole shares only, so on a $10k book one LLY share is 11.3% and one COST
-    share is 9.5%. A 6% target on either is not a small position, it is 0.53 shares: the executor
-    skips it every day and the name never enters the book. On 2026-10-13 that was the difference
-    between a decision reading 84% invested and a book that would have reached 59%.
-    """
-    equity = book_equity(previous)
-    if equity <= 0:
-        return {}
-    weights = {}
-    for row in packet.get("features", []):
-        close = row.get("last_close")
-        if finite(close) and float(close) > 0:
-            weights[row["symbol"]] = float(close) / equity
-    return weights
 
 
 def resolve_fact(reference, evidence, symbol=None):
@@ -390,8 +358,6 @@ def validate(decision, config, packet, previous):
                     kinds={"news"}, where=f"macro_claims[{len(claims)}] {row['claim'].strip()[:40]!r}")
         claims.append(row["claim"])
     prior = {p.get("symbol") for p in ((previous.get("last_decision") or {}).get("positions") or [])}
-    held = {symbol for symbol, h in (previous.get("holdings") or {}).items() if (h.get("shares") or 0) > 0}
-    granularity = share_weights(packet, previous)
     seen, total, count = set(), 0.0, 0
     for position in decision["positions"]:
         if not isinstance(position, dict) or set(position) != set(POSITION["required"]):
@@ -407,15 +373,6 @@ def validate(decision, config, packet, previous):
         weight = position["target_weight"]
         if not finite(weight) or not 0 <= weight <= config["max_weight"]:
             raise ValueError(f"Position limit violation on {symbol}: weight {weight!r}")
-        # A name with nothing held cannot be opened for less than one share. Below that the executor
-        # skips it on every future round too, so the weight is not small, it is unreachable - and the
-        # participation floor would be counting exposure the account can never take on.
-        floor_for_symbol = granularity.get(symbol)
-        if weight > 0 and symbol not in held and floor_for_symbol and weight < floor_for_symbol:
-            raise ValueError(f"Unreachable opening weight on {symbol}: {weight:.1%} is "
-                             f"{weight / floor_for_symbol:.2f} of one share. One share is "
-                             f"{floor_for_symbol:.1%} of this book (INPUT.limits.one_share_weight), "
-                             f"so open it at {floor_for_symbol:.1%} or more, or leave it at 0")
         if position["action"] not in ACTIONS:
             raise ValueError(f"Unknown action on {symbol}: {position['action']!r}")
         if (position["action"] in FLAT_ACTIONS) != (weight == 0):
@@ -497,8 +454,6 @@ def build_prompt(packet, previous, config, user_prompt="", portfolio_mode="shado
     # there: the key existed only in config.json, where validate() reads it. Pointing an answer at a
     # field that does not exist is not a style problem.
     limits["min_invested"] = config.get("min_invested", 0)
-    limits["one_share_weight"] = {symbol: round(weight, 5) for symbol, weight
-                                  in sorted(share_weights(packet, previous).items())}
     context = {"limits": limits,
                "shadow_portfolio": {k: previous[k] for k in ("cash", "holdings", "last_decision")}, "packet": public}
     if portfolio_mode == "alpaca_paper":
