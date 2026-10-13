@@ -5,6 +5,7 @@ const money = value => value==null||!Number.isFinite(Number(value)) ? "未知" :
 const pct = value => value==null||!Number.isFinite(Number(value)) ? "未知" : (Number(value)*100).toFixed(1)+"%";
 const time = value => value&&!Number.isNaN(Date.parse(value)) ? new Date(value).toLocaleString("zh-CN",{hour12:false}) : (value||"—");
 const picked={}, tabs={};
+let renderedSignature=null;
 function link(url) {
   if(!/^https:\/\//i.test(url||"")) return null;
   const a=el("a","原文 ↗"); a.href=url; a.target="_blank"; a.rel="noopener noreferrer"; return a;
@@ -110,7 +111,10 @@ function teamView(team) {
 }
 async function refresh(){
   try{const response=await fetch("/api/teams",{cache:"no-store"}),data=await response.json();if(!response.ok)throw Error(data.error||"发布暂不可读");
-    $("message").textContent="";$("teams").replaceChildren(...(data.teams||[]).map(teamView));$("updated").textContent="页面更新 "+new Date().toLocaleTimeString("zh-CN",{hour12:false});
+    const signature=JSON.stringify((data.teams||[]).map(team=>[team.team_id,team.published_at,team.status]));
+    $("message").textContent="";
+    if(signature!==renderedSignature){$("teams").replaceChildren(...(data.teams||[]).map(teamView));renderedSignature=signature;}
+    $("updated").textContent="页面更新 "+new Date().toLocaleTimeString("zh-CN",{hour12:false});
   }catch(error){$("message").textContent="读取失败："+error.message;}
 }
 refresh();setInterval(refresh,30000);
