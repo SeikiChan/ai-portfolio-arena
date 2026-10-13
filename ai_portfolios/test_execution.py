@@ -212,10 +212,14 @@ def record_file(round_dir):
     return round_dir.parents[1] / "executions" / round_dir.name / "execution.json"
 
 
-def getter_for(acct=None, positions=(), is_open=True, quotes=None, orders=()):
+def getter_for(acct=None, positions=(), is_open=True, quotes=None, orders=(), broker_ahead=0.0):
     def getter(url, headers=None, params=None, timeout=None, allow_redirects=None):
         if "/v2/clock" in url:
-            return Response(200, {"is_open": is_open, "next_open": "2026-10-13T13:30:00Z"})
+            # The real endpoint stamps its own time, and that stamp is what quote ages are measured
+            # against. broker_ahead models this machine running that many seconds behind it.
+            stamped = execution.now() + timedelta(seconds=broker_ahead)
+            return Response(200, {"is_open": is_open, "timestamp": stamped.isoformat(),
+                                  "next_open": "2026-10-13T13:30:00Z"})
         if "quotes/latest" in url:
             return Response(200, {"quotes": quotes if quotes is not None else {"MSFT": quote()}})
         if url.endswith("/v2/account"):
@@ -292,7 +296,8 @@ def test_without_a_tradable_quote_a_dry_run_shows_indicative_intent(round_dir):
 
 
 def test_an_indicative_plan_can_never_be_submitted(round_dir, monkeypatch):
-    monkeypatch.setattr(execution, "session_open", lambda *a, **k: {"is_open": True})
+    monkeypatch.setattr(execution, "session_open",
+                        lambda *a, **k: {"is_open": True, "timestamp": execution.now().isoformat()})
     monkeypatch.setattr(execution, "plan", lambda *a, **k: {"tradable": False, "orders": [], "equity": 1.0,
                                                             "cash": 1.0, "deferred": [], "skipped": [], "no_op": []})
     with pytest.raises(ValueError, match="指示性计划不可提交"):
@@ -389,34 +394,79 @@ def test_a_quote_already_in_the_past_is_not_waited_on():
     assert slept == []
 
 
-def test_a_clock_genuinely_wrong_stops_the_round(monkeypatch):
-    # Beyond a couple of seconds this is a broken machine clock, and waiting cannot fix it.
+def test_a_quote_ahead_of_the_brokers_own_clock_stops_the_round():
+    # `at` is already broker-referenced here, so a quote still 30s ahead of it is not explained by
+    # this machine. That is bad data, and waiting it out would be inventing freshness.
     far = {"MSFT": quote(at=TIME + timedelta(seconds=30))}
-    with pytest.raises(ValueError, match="时钟偏差"):
+    with pytest.raises(ValueError, match="券商自己的时钟"):
         execution.settle_quotes(far, TIME, sleep=lambda s: None)
+
+
+def test_a_machine_clock_hours_out_is_refused_not_quietly_corrected(monkeypatch):
+    # A correction of this size would also distort the packet-expiry window, so it must not be
+    # applied silently. Small drift is calibration; an hour is a broken machine.
+    monkeypatch.setattr(execution, "now", lambda: TIME)
+    monkeypatch.setattr(execution, "session_open",
+                        lambda *a, **k: {"is_open": True, "timestamp": (TIME + timedelta(hours=1)).isoformat()})
+    with pytest.raises(ValueError, match="超出可校正范围"):
+        execution.broker_clock(("k", "s"))
+
+
+def test_a_clock_response_without_a_timestamp_cannot_calibrate(monkeypatch):
+    monkeypatch.setattr(execution, "session_open", lambda *a, **k: {"is_open": True})
+    with pytest.raises(ValueError, match="缺少 timestamp"):
+        execution.broker_clock(("k", "s"))
+
+
+def test_the_offset_is_attributed_to_the_middle_of_the_request(monkeypatch):
+    # A slow round trip must cost accuracy symmetrically rather than bias the correction.
+    times = iter((TIME, TIME + timedelta(seconds=1)))
+    monkeypatch.setattr(execution, "now", lambda: next(times))
+    monkeypatch.setattr(execution, "session_open",
+                        lambda *a, **k: {"is_open": True, "timestamp": (TIME + timedelta(seconds=2)).isoformat()})
+    clock = execution.broker_clock(("k", "s"))
+    assert clock["clock_offset_seconds"] == 1.5 and clock["clock_round_trip_seconds"] == 1.0
 
 
 def test_settling_runs_before_the_plan_is_priced(round_dir, monkeypatch):
     # The whole plan used to be rejected when any one symbol looked like it came from the future.
+    # now() is pinned so the measured offset is exactly zero: otherwise the microseconds between the
+    # two clock reads land in `at` and this assertion flakes.
+    monkeypatch.setattr(execution, "now", lambda: TIME)
     calls = []
-    monkeypatch.setattr(execution, "settle_quotes", lambda q, at, sleep=None: calls.append(at) or at)
+    monkeypatch.setattr(execution, "settle_quotes", lambda q, at, offset=0.0, sleep=None: calls.append(at) or at)
     execution.execute("claude", round_dir, CONFIG, submit_orders=False, getter=getter_for(), at=TIME)
     assert calls == [TIME]
 
 
-def test_live_quote_uses_clock_after_broker_reads(round_dir, monkeypatch):
-    # The account/quote requests may take over two seconds. Their fresh quote must
-    # not look future-dated against the timestamp captured at execute() entry.
+def test_a_local_clock_seconds_behind_the_broker_does_not_cost_the_day(round_dir, monkeypatch):
+    """The second lost trading day, as a test.
+
+    2026-10-13 06:30: this machine sat 2.1s behind Alpaca, every fresh quote therefore looked
+    2.1s future-dated, and a 2.0s tolerance on the LOCAL clock rejected the whole plan. The drift
+    was 0.17s the morning before and 0.3s that afternoon, so no fixed local tolerance is right.
+    Measure the broker's clock and the quote is simply current.
+    """
     job = read(round_dir / "round.json")
     job.update(engine_id="codex_engine", providers=["gpt"])
     write(round_dir / "round.json", job)
     write(round_dir / "gpt_status.json", read(round_dir / "claude_status.json"))
-    times = iter((TIME, TIME + timedelta(seconds=2.2)))
-    monkeypatch.setattr(execution, "now", lambda: next(times))
-    fresh_quote = {"MSFT": quote(at=TIME + timedelta(seconds=2.1))}
+    monkeypatch.setattr(execution, "now", lambda: TIME)
+    monkeypatch.setattr(execution.wait, "sleep", lambda seconds: pytest.fail("nothing to wait out"))
+    broker_now = TIME + timedelta(seconds=2.1)
 
     record = execution.execute("gpt", round_dir, CONFIG, submit_orders=False,
-                               getter=getter_for(quotes=fresh_quote))
+                               getter=getter_for(quotes={"MSFT": quote(at=broker_now)}, broker_ahead=2.1))
 
-    assert record["engine_id"] == "codex_engine" and record["mode"] == "dry_run"
+    assert record["session"]["clock_offset_seconds"] == 2.1
     assert record["plan"]["orders"][0]["symbol"] == "MSFT"
+    assert record["plan"]["orders"][0]["quote_age_seconds"] == 0.0
+
+
+def test_a_dry_run_still_reads_the_clock_so_its_quote_ages_are_honest(round_dir, monkeypatch):
+    # A dry run used to skip the clock entirely and label the session "not checked", which left its
+    # quote ages measured against an uncalibrated local clock - the one number it exists to show.
+    monkeypatch.setattr(execution, "now", lambda: TIME)
+    record = execution.execute("claude", round_dir, CONFIG, submit_orders=False,
+                               getter=getter_for(is_open=False, broker_ahead=1.4))
+    assert record["mode"] == "dry_run" and record["session"]["clock_offset_seconds"] == 1.4

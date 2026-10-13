@@ -267,6 +267,70 @@ def test_event_invalidation_does_not_need_a_price_reference():
     assert validate(plan, CONFIG, packet(), initial_book(100000))
 
 
+def english_packet():
+    """The real XOM record from 2026-10-13, the one a capital V cost an account a trading day over."""
+    data = packet()
+    data["evidence"][1] = {
+        "id": "news:AAPL:1", "symbol": "AAPL", "kind": "news", "as_of": TIME.isoformat(),
+        "headline": "Iran Offers to Broker Saudi-Houthi Talks as Riyadh Vows an \u2018Equally Serious\u2019 "
+                    "Response to Deadly Airport Strikes: Report",
+        "summary": "Iran\u2019s Araghchi urges diplomacy in call with Saudi FM."}
+    return data
+
+
+def quoting(text):
+    plan = decision()
+    plan["positions"][0]["evidence_quotes"] = [{"evidence_id": "news:AAPL:1", "quote": text}]
+    return plan
+
+
+def test_a_quote_differing_only_in_letter_case_is_accepted():
+    """2026-10-13: the packet said "Riyadh Vows an ..." and the answer said "Riyadh vows an ...".
+
+    One letter rejected a 10-name, 84%-invested book twice over and the account traded nothing that
+    day. The check exists to catch a claim attributed to a record that does not say it; lowercasing
+    a word attributes nothing.
+    """
+    plan = quoting("Riyadh vows an \u2018Equally Serious\u2019 Response")
+    assert validate(plan, CONFIG, english_packet(), initial_book(100000))
+
+
+def test_a_quote_retyped_with_straight_quotation_marks_is_accepted():
+    plan = quoting("Riyadh Vows an 'Equally Serious' Response")
+    assert validate(plan, CONFIG, english_packet(), initial_book(100000))
+
+
+def test_an_accepted_typographic_variant_is_still_recorded():
+    # Accepted is not the same as unremarked: faithfulness has to stay measurable afterwards.
+    plan = quoting("riyadh vows an 'equally serious' response")
+    data = english_packet()
+    validate(plan, CONFIG, data, initial_book(100000))
+    assert quality_flags(plan, data)["inexact_quotes"] == ["AAPL:news:AAPL:1"]
+
+
+def test_a_character_exact_quote_is_not_recorded_as_a_variant():
+    plan = quoting("Riyadh Vows an \u2018Equally Serious\u2019 Response")
+    data = english_packet()
+    assert quality_flags(plan, data)["inexact_quotes"] == []
+
+
+def test_folding_case_does_not_let_a_fabricated_quote_through():
+    # The rep08 failure, lowercased. Folding typography must not widen what the rule actually catches.
+    plan = quoting("riyadh offers to buy the airport outright")
+    with pytest.raises(ValueError, match="not verbatim"):
+        validate(plan, CONFIG, english_packet(), initial_book(100000))
+
+
+def test_a_rejected_quote_says_which_position_and_which_record():
+    """The retry has one attempt. "Quote is not verbatim in the cited evidence" named neither the
+    position nor the record, so the model rewrote a whole evidence block and broke a fact_ref."""
+    plan = quoting("这句话数据包里根本没有出现过")
+    with pytest.raises(ValueError) as caught:
+        validate(plan, CONFIG, english_packet(), initial_book(100000))
+    message = str(caught.value)
+    assert "AAPL evidence_quotes[0]" in message and "news:AAPL:1" in message
+
+
 def test_unattributed_macro_statement_is_recorded_not_rejected():
     # Losing a trading day is worse than an untraceable sentence that stays visible in the archive.
     plan = decision()

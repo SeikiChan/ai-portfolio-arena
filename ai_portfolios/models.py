@@ -163,48 +163,94 @@ def squeeze(text):
     return re.sub(r"\s+", "", text)
 
 
+# Characters a model commonly retypes in a different form than the packet carries them.
+TYPOGRAPHY = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
+                            "\u2013": "-", "\u2014": "-", "\u2212": "-", "\u00a0": " "})
+
+
+def fold(text):
+    """Whitespace, letter case and typographic variants removed.
+
+    The quote check exists to catch a claim attributed to a record that does not say it. A model
+    that retypes a headline and lowercases one word has fabricated nothing - and on 2026-10-13
+    exactly that ended a trading day for one account: the packet said "Riyadh Vows an 'Equally
+    Serious' Response" and the answer said "Riyadh vows an ...", one letter apart, curly quotes
+    and all. Accept the variant and record it, rather than spend a day on a capital V.
+    """
+    return squeeze(text).translate(TYPOGRAPHY).casefold()
+
+
 def evidence_text(item):
     # Quotes are checked against the whole record, so raw keys and raw digits both count as verbatim.
     return squeeze(json.dumps(item, ensure_ascii=False, sort_keys=True))
 
 
+def quote_match(quote, item):
+    """How closely a quote sits inside the cited record: "exact", "folded", or None."""
+    record = evidence_text(item)
+    if squeeze(quote) in record:
+        return "exact"
+    if fold(quote) in fold(record):
+        return "folded"
+    return None
+
+
 def resolve_fact(reference, evidence, symbol=None):
+    # Every rejection below names the offending reference. A message that only says a fact_ref is
+    # wrong forces the one retry to guess which one, and a broad rewrite then trips something else.
+    at = f" on {symbol}" if symbol else ""
     if not isinstance(reference, str) or reference.count("#") != 1:
-        raise ValueError("Malformed fact reference")
+        raise ValueError(f"Malformed fact reference{at}: {reference!r} is not <evidence_id>#<field>")
     identity, field = reference.split("#")
     item = evidence.get(identity)
     if item is None or not isinstance(item.get("data"), dict):
-        raise ValueError("Fact reference points at no packet data")
+        raise ValueError(f"Fact reference points at no packet data{at}: no evidence record {identity!r}")
     if symbol is not None and item.get("symbol") != symbol:
-        raise ValueError("Fact reference belongs to another symbol")
+        raise ValueError(f"Fact reference belongs to another symbol{at}: {reference} is "
+                         f"{item.get('symbol')} evidence")
     if field not in item["data"] or item["data"][field] is None:
-        raise ValueError("Fact reference names a field the packet does not provide")
+        offered = ", ".join(sorted(k for k, v in item["data"].items() if v is not None)[:12])
+        raise ValueError(f"Fact reference names a field the packet does not provide{at}: {identity} "
+                         f"has no {field!r}; it provides {offered}")
     return item, field, item["data"][field]
 
 
-def check_quote(row, evidence, allowed_ids=None, kinds=None):
+def check_quote(row, evidence, allowed_ids=None, kinds=None, where=""):
+    # `where` locates the quote for the retry. "Quote is not verbatim in the cited evidence" with no
+    # location ended a live round: the model could not tell which of eight positions to repair, so it
+    # rewrote a whole evidence block and broke a fact_ref instead.
+    at = f" on {where}" if where else ""
     if not isinstance(row, dict) or not isinstance(row.get("evidence_id"), str) or not isinstance(row.get("quote"), str):
-        raise ValueError("Invalid quote")
-    item = evidence.get(row["evidence_id"])
+        raise ValueError(f"Invalid quote{at}: each entry needs a string evidence_id and a string quote")
+    identity, excerpt = row["evidence_id"], row["quote"].strip()[:80]
+    item = evidence.get(identity)
     if item is None or (allowed_ids is not None and item["id"] not in allowed_ids):
-        raise ValueError("Invented evidence reference")
+        known = "no such record in the packet" if item is None else "not listed in this position evidence_ids"
+        raise ValueError(f"Invented evidence reference{at}: {identity} is {known}")
     if kinds is not None and item.get("kind") not in kinds:
-        raise ValueError("Quote cites the wrong kind of evidence")
+        raise ValueError(f"Quote cites the wrong kind of evidence{at}: {identity} is "
+                         f"{item.get('kind')}, this field needs one of {sorted(kinds)}")
     quoted = squeeze(row["quote"])
-    if len(quoted) < 4 or quoted not in evidence_text(item):
-        raise ValueError("Quote is not verbatim in the cited evidence")
+    if len(quoted) < 4:
+        raise ValueError(f"Quote too short to check{at}: {excerpt!r} against {identity}")
+    if quote_match(row["quote"], item) is None:
+        raise ValueError(f"Quote is not verbatim in the cited evidence{at}: {excerpt!r} does not "
+                         f"appear in {identity}. Copy a span out of that record unchanged, digits "
+                         f"included, or cite the record that really carries this wording")
     return item
 
 
 def check_invalidation(rule, evidence, symbol):
     if not isinstance(rule, dict) or set(rule) != set(INVALIDATION["required"]):
-        raise ValueError("Invalid invalidation rule")
+        raise ValueError(f"Invalid invalidation rule on {symbol}: needs exactly "
+                         f"{sorted(INVALIDATION['required'])}")
     if rule["kind"] not in INVALIDATION_KINDS:
-        raise ValueError("Unknown invalidation kind")
+        raise ValueError(f"Unknown invalidation kind on {symbol}: {rule['kind']!r} is not one of "
+                         f"{sorted(INVALIDATION_KINDS)}")
     if not isinstance(rule["description"], str) or len(rule["description"].strip()) < 8:
-        raise ValueError("Missing invalidation description")
+        raise ValueError(f"Missing invalidation description on {symbol}: say what would make you wrong")
     if not isinstance(rule["reference"], str) or not rule["reference"].strip():
-        raise ValueError("Missing invalidation reference")
+        raise ValueError(f"Missing invalidation reference on {symbol}")
     if rule["kind"] not in PRICE_KINDS:
         return
     try:
@@ -212,11 +258,13 @@ def check_invalidation(rule, evidence, symbol):
     except ValueError:
         item, field, _ = resolve_fact(rule["reference"], evidence, symbol)
         if item["kind"] != "derived_price" or field not in FEATURE_KEYS:
-            raise ValueError("Price invalidation must reference a price feature or a level")
+            raise ValueError(f"Price invalidation must reference a price feature or a level on "
+                             f"{symbol}: {rule['reference']} is neither")
         return
     close = (evidence.get("price:" + symbol) or {}).get("data", {}).get("last_close")
     if not finite(level) or level <= 0 or not finite(close) or not 0.2 * close <= level <= 5 * close:
-        raise ValueError("Price invalidation level is implausible")
+        raise ValueError(f"Price invalidation level is implausible on {symbol}: {rule['reference']} "
+                         f"against a last close of {close}")
 
 
 def decision_prose(decision):
@@ -227,7 +275,7 @@ def decision_prose(decision):
     return parts
 
 
-def quality_flags(decision):
+def quality_flags(decision, packet=None):
     """Attributes worth recording that do not make a decision unusable.
 
     An unattributed macro term used to be a rejection. It is now recorded instead, because the two
@@ -239,9 +287,32 @@ def quality_flags(decision):
     """
     claims = [c.get("claim", "") for c in decision.get("macro_claims", []) if isinstance(c, dict)]
     prose = decision_prose(decision)
-    return {"unattributed_macro": sorted({group[0] for group in MACRO_GROUPS
-                                          if asserted(group, prose)
-                                          and not any(t in c for t in group for c in claims)})}
+    flags = {"unattributed_macro": sorted({group[0] for group in MACRO_GROUPS
+                                           if asserted(group, prose)
+                                           and not any(t in c for t in group for c in claims)})}
+    if packet is not None:
+        flags["inexact_quotes"] = inexact_quotes(decision, {row["id"]: row for row in packet["evidence"]})
+    return flags
+
+
+def inexact_quotes(decision, evidence):
+    """Quotes that only matched after folding case and typography.
+
+    Not errors, and not rejected - but the difference between a copied span and a retyped one is
+    worth keeping visible, or the faithfulness the quote rule buys quietly erodes.
+    """
+    rows = [({"evidence_id": c.get("evidence_id"), "quote": c.get("quote")}, "macro_claims")
+            for c in decision.get("macro_claims", []) if isinstance(c, dict)]
+    for position in decision.get("positions", []):
+        if isinstance(position, dict) and isinstance(position.get("evidence_quotes"), list):
+            rows += [(row, position.get("symbol")) for row in position["evidence_quotes"]
+                     if isinstance(row, dict)]
+    found = set()
+    for row, where in rows:
+        item = evidence.get(row.get("evidence_id"))
+        if item and quote_match(str(row.get("quote", "")), item) == "folded":
+            found.add(f"{where}:{row.get('evidence_id')}")
+    return sorted(found)
 
 
 def asserted(group, prose):
@@ -259,7 +330,9 @@ def asserted(group, prose):
 
 def validate(decision, config, packet, previous):
     if not isinstance(decision, dict) or set(decision) != set(SCHEMA["required"]):
-        raise ValueError("Invalid decision fields")
+        present = set(decision) if isinstance(decision, dict) else set()
+        raise ValueError(f"Invalid decision fields: missing {sorted(set(SCHEMA['required']) - present)}, "
+                         f"unexpected {sorted(present - set(SCHEMA['required']))}")
     for field in ("overview", "cash_reason"):
         if not isinstance(decision[field], str) or not decision[field].strip():
             raise ValueError(f"Missing {field}")
@@ -274,14 +347,21 @@ def validate(decision, config, packet, previous):
     claims = []
     for row in decision["macro_claims"]:
         if not isinstance(row, dict) or set(row) != set(MACRO_CLAIM["required"]) or not isinstance(row["claim"], str) or len(row["claim"].strip()) < 4:
-            raise ValueError("Invalid macro claim")
-        check_quote({"evidence_id": row["evidence_id"], "quote": row["quote"]}, evidence, kinds={"news"})
+            shown = row.get("claim") if isinstance(row, dict) else row
+            raise ValueError(f"Invalid macro claim: {str(shown)[:60]!r} needs "
+                             f"{sorted(MACRO_CLAIM['required'])} with a claim of at least 4 characters")
+        check_quote({"evidence_id": row["evidence_id"], "quote": row["quote"]}, evidence,
+                    kinds={"news"}, where=f"macro_claims[{len(claims)}] {row['claim'].strip()[:40]!r}")
         claims.append(row["claim"])
     prior = {p.get("symbol") for p in ((previous.get("last_decision") or {}).get("positions") or [])}
     seen, total, count = set(), 0.0, 0
     for position in decision["positions"]:
         if not isinstance(position, dict) or set(position) != set(POSITION["required"]):
-            raise ValueError("Invalid position fields")
+            present = set(position) if isinstance(position, dict) else set()
+            shown = position.get("symbol", f"positions[{len(seen)}]") if isinstance(position, dict) else f"positions[{len(seen)}]"
+            raise ValueError(f"Invalid position fields on {shown}: missing "
+                             f"{sorted(set(POSITION['required']) - present)}, unexpected "
+                             f"{sorted(present - set(POSITION['required']))}")
         symbol = position["symbol"]
         if not isinstance(symbol, str) or symbol not in config["universe"] or symbol in seen:
             raise ValueError(f"Unknown or duplicate symbol: {symbol}")
@@ -301,7 +381,8 @@ def validate(decision, config, packet, previous):
         # Only a name that was in the last decision has something to compare against; for a brand new
         # position "首次建仓" is complete information, and demanding more invites padding.
         if symbol in prior and len(changes.strip()) < 8:
-            raise ValueError("Missing changes_vs_last")
+            raise ValueError(f"Missing changes_vs_last on {symbol}: it was in the last decision, so "
+                             f"say what new evidence moved or held the weight ({changes.strip()!r} is too short)")
         if type(position["horizon_days"]) is not int or not 1 <= position["horizon_days"] <= 365:
             raise ValueError(f"Invalid horizon on {symbol}")
         if not finite(position["confidence"]) or not 0.05 <= position["confidence"] <= 0.95:
@@ -322,8 +403,8 @@ def validate(decision, config, packet, previous):
                 price_fields.append(field)
         if not isinstance(position["evidence_quotes"], list):
             raise ValueError(f"Invalid evidence quotes on {symbol}")
-        for row in position["evidence_quotes"]:
-            check_quote(row, evidence, allowed_ids=set(ids))
+        for index, row in enumerate(position["evidence_quotes"]):
+            check_quote(row, evidence, allowed_ids=set(ids), where=f"{symbol} evidence_quotes[{index}]")
         check_invalidation(position["invalidation"], evidence, symbol)
         linked = [evidence[i] for i in ids if evidence[i]["symbol"] == symbol]
         if weight > 0:
@@ -336,10 +417,16 @@ def validate(decision, config, packet, previous):
                 raise ValueError(f"Stale price evidence on {symbol}")
             count += 1
         total += weight
-    if total > config["max_invested"] + 1e-9 or count > config["max_positions"]:
-        raise ValueError("Portfolio limit violation")
+    if total > config["max_invested"] + 1e-9:
+        raise ValueError(f"Portfolio limit violation: {total:.1%} invested exceeds the "
+                         f"{config['max_invested']:.0%} ceiling")
+    if count > config["max_positions"]:
+        raise ValueError(f"Portfolio limit violation: {count} positive positions exceed the "
+                         f"limit of {config['max_positions']}")
     if not set(previous["holdings"]).issubset(seen):
-        raise ValueError("Existing holding omitted without an exit decision")
+        dropped = sorted(set(previous["holdings"]) - seen)
+        raise ValueError(f"Existing holding omitted without an exit decision: {', '.join(dropped)}. "
+                         f"Output the complete portfolio, including anything you intend to sell")
     floor = config.get("min_invested")
     if floor and total < floor - 1e-9:
         raise ValueError(f"Below the participation floor: {total:.0%} invested, {floor:.0%} required")
@@ -508,7 +595,7 @@ def run_model(name, packet, previous, config, directory, user_prompt="", portfol
                 attempt += 1
         result["attempts"] = attempt
         result["rejections_before_acceptance"] = rejections
-        result["quality_flags"] = quality_flags(result["decision"])
+        result["quality_flags"] = quality_flags(result["decision"], packet)
         result["status"] = "validated"
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, RuntimeError) as exc:
         result["status"] = "failed"

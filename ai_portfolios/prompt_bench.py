@@ -17,8 +17,9 @@ import statistics
 from pathlib import Path
 
 from .common import APP, ROOT, digest, read, now, stamp, write
-from .models import (MACRO_TERMS, PRICE_KINDS, build_prompt, evidence_text, squeeze, text_digest,
-                     research_instruction, run_model, validate, INSTRUCTION_VERSION, REASONING_EFFORT)
+from .models import (MACRO_TERMS, PRICE_KINDS, build_prompt, evidence_text, quote_match, squeeze,
+                     text_digest, research_instruction, run_model, validate, INSTRUCTION_VERSION,
+                     REASONING_EFFORT)
 from .paper_accounts import model_portfolio
 
 BENCH = ROOT / "reports" / "ai_paper_console" / "bench"
@@ -77,12 +78,16 @@ def quoted_text(decision):
 def score(decision, packet):
     """Soft metrics on a parsed answer, computed whether or not it passed validation."""
     evidence = {row["id"]: row for row in packet["evidence"]}
-    quotes, faithful = 0, 0
+    quotes, faithful, folded = 0, 0, 0
     for row in list(decision.get("macro_claims", [])) + [q for p in decision.get("positions", []) for q in p.get("evidence_quotes", [])]:
         quotes += 1
         item = evidence.get(row.get("evidence_id"))
-        if item and squeeze(str(row.get("quote", ""))) in evidence_text(item):
-            faithful += 1
+        # The validator accepts a quote that differs only in case or typography. The bench keeps
+        # scoring character-exact copying, and counts the rest separately, so accepting the
+        # variant does not quietly inflate the faithfulness number it is measured by.
+        closeness = quote_match(str(row.get("quote", "")), item) if item else None
+        faithful += closeness == "exact"
+        folded += closeness == "folded"
     claims = [c.get("claim", "") for c in decision.get("macro_claims", [])]
     prose = prose_of(decision)
     haystack = quoted_text(decision)
@@ -97,7 +102,7 @@ def score(decision, packet):
     refs = [r for p in decision.get("positions", []) for r in p.get("fact_refs", [])]
     return {"positions": len(decision.get("positions", [])), "positive_positions": len(positive),
             "total_weight": round(sum(p.get("target_weight") or 0 for p in decision.get("positions", [])), 4),
-            "quotes": quotes, "quote_faithful": faithful, "fact_refs": len(refs),
+            "quotes": quotes, "quote_faithful": faithful, "quote_folded": folded, "fact_refs": len(refs),
             "bare_numbers_in_prose": bare,
             "unattributed_macro": [t for t in MACRO_TERMS if any(t in p for p in prose) and not any(t in c for c in claims)],
             "machine_checkable_exits": checkable,
@@ -121,6 +126,7 @@ def summarise(repeats, packet, canary_id=None):
                "schema_pass_rate": round(sum(r["status"] == "validated" for r in repeats) / len(repeats), 4),
                "failures": sorted({r["error"] for r in repeats if r["error"]}),
                "quote_faithfulness": round(sum(r["metrics"]["quote_faithful"] for r in parsed) / total_quotes, 4) if total_quotes else None,
+               "quote_typography_only": round(sum(r["metrics"]["quote_folded"] for r in parsed) / total_quotes, 4) if total_quotes else None,
                "quotes_per_run": round(total_quotes / len(parsed), 2) if parsed else None,
                "bare_numbers_per_run": round(sum(r["metrics"]["bare_numbers_in_prose"] for r in parsed) / len(parsed), 2) if parsed else None,
                "unattributed_macro_runs": sum(bool(r["metrics"]["unattributed_macro"]) for r in parsed),
