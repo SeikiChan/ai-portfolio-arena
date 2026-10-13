@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import os
 from pathlib import Path
 
@@ -59,6 +60,60 @@ def prompt_text(directory, provider):
     return head + ELISION, hashlib.sha256(full.encode("utf-8")).hexdigest(), len(full)
 
 
+def account_mark(directory, provider, job):
+    """One observed Paper account mark at the round's recorded snapshot time."""
+    path = directory / "account_snapshot" / f"{provider}_account.json"
+    if not path.exists():
+        return None
+    account = read(path)
+    try:
+        equity = float(account["equity"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not math.isfinite(equity) or equity <= 0:
+        return None
+    return {"round_id": job["id"], "experiment_id": job.get("experiment_id"),
+            "at": job.get("account_snapshot_id"), "equity": equity,
+            "classification": "observed: Alpaca Paper account snapshot",
+            "source_file": f"account_snapshot/{provider}_account.json"}
+
+
+def research_trace(directory, provider):
+    """Publish model research actions and bounded public tool excerpts, never prompt inputs."""
+    turns = []
+    for path in sorted(directory.glob(f"research_*_{provider}_response.json")):
+        turn = read(path)
+        turns.append({"kind": "model", "step": path.stem.split("_")[1],
+                      "done": turn.get("done"), "actions": turn.get("actions", [])})
+    for path in sorted(directory.glob("research_*_request.json")):
+        result_path = path.with_name(path.name.replace("_request.json", "_result.json"))
+        request = read(path)
+        result = read(result_path) if result_path.exists() else {}
+        excerpt = result.get("text") or ""
+        turns.append({"kind": "tool", "step": path.stem.split("_")[1],
+                      "action": request.get("action", {}), "status": result.get("status", "unknown"),
+                      "classification": result.get("classification", "unknown"),
+                      "text": excerpt[:4000], "excerpt_truncated": len(excerpt) > 4000,
+                      "url": result.get("url"), "source_sha256": result.get("source_sha256")})
+    return sorted(turns, key=lambda row: (int(row["step"]), row["kind"] != "model"))
+
+
+def decision_evidence(directory, decision):
+    packet_path = directory / "decision_packet.json"
+    if not packet_path.exists():
+        packet_path = directory / "packet.json"
+    packet = read(packet_path)
+    used = {identity for position in decision.get("positions", [])
+            for identity in position.get("evidence_ids", [])}
+    rows = []
+    for item in packet.get("evidence", []):
+        if item.get("id") not in used:
+            continue
+        rows.append({key: item.get(key) for key in ("id", "kind", "classification", "as_of", "url", "headline")})
+    facts = {item["id"]: item.get("data", {}) for item in packet.get("evidence", []) if item.get("id") in used}
+    return rows, facts
+
+
 def provider_entry(directory, provider, summary, job):
     status_file = directory / f"{provider}_status.json"
     status = read(status_file) if status_file.exists() else {}
@@ -69,6 +124,18 @@ def provider_entry(directory, provider, summary, job):
     execution = read(execution_file) if execution_file.exists() else {}
     broker_orders = execution.get("results", [])
     account = execution.get("account_observed", {})
+    mark = account_mark(directory, provider, job)
+    evidence, facts = decision_evidence(directory, decision)
+    detailed_positions = []
+    for position in decision.get("positions", []):
+        references = []
+        for reference in position.get("fact_refs", []):
+            identity, _, field = reference.partition("#")
+            references.append({"ref": reference, "value": facts.get(identity, {}).get(field)})
+        detailed_positions.append({key: position.get(key) for key in
+                                   ("symbol", "action", "target_weight", "thesis", "changes_vs_last",
+                                    "invalidation", "horizon_days", "confidence", "evidence_ids", "evidence_quotes")}
+                                  | {"facts": references})
     return {"id": f"{summary['round_id']}:{provider}", "round_id": summary["round_id"], "provider": provider,
             "experiment_id": job.get("experiment_id"), "research_enabled": job.get("research_enabled", False),
             "decision_packet_sha256": job.get("decision_packet_sha256"),
@@ -86,6 +153,8 @@ def provider_entry(directory, provider, summary, job):
             "execution_error": execution.get("execution_error"),
             "orders_submitted": any(o.get("outcome") in {"accepted", "duplicate_ignored", "submission_unknown"} for o in broker_orders),
             "account_observed": account,
+            "equity_mark": mark, "research_trace": research_trace(directory, provider),
+            "decision_details": detailed_positions, "decision_evidence": evidence,
             "broker_orders": broker_orders,
             "overview": decision.get("overview"), "cash_reason": decision.get("cash_reason"),
             "evidence_gaps": decision.get("evidence_gaps", []),
@@ -115,10 +184,11 @@ def build(engine_id="claude_engine", team_id=None, limit=20):
             # A round that breaches the contract is never silently dropped: a missing round and an
             # invalid round must not look the same to whoever reads the dashboard.
             rejected.append({"round_id": directory.name, "reason": str(exc)[:200]})
+    history = sorted((row["equity_mark"] for row in rounds if row.get("equity_mark")), key=lambda row: row["at"] or "")
     return {"schema_version": SCHEMA_VERSION, "team_id": team_id, "engine_id": engine_id,
             "branch": branch_name(), "workspace": str(ROOT), "execution_mode": "alpaca_paper_auto",
             "status": "available" if rounds else ("initialized_no_runs" if not rejected else "unavailable"),
-            "published_at": stamp(), "rounds": rounds, "rejected_rounds": rejected,
+            "published_at": stamp(), "rounds": rounds, "equity_history": history, "rejected_rounds": rejected,
             "orders_submitted": any(round_.get("orders_submitted") for round_ in rounds),
             "note": "独立引擎各自连接自己的 Alpaca Paper 账户；页面只读共享发布文件。Paper 委托与成交不代表真实资金结果，收益未经验证。",
             "classification": {"model_decisions": "assumption", "audit_hashes": "observed",
