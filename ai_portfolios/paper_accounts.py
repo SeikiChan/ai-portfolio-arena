@@ -69,6 +69,22 @@ def read_one(name, credentials, directory, getter=None):
     return result
 
 
+def account_identity(name, credentials, getter=None):
+    """Read a Paper account ID without persisting or publishing broker credentials."""
+    getter = getter or requests.get
+    key, secret = credentials
+    response = getter(BASE + "/v2/account",
+                      headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
+                      timeout=20, allow_redirects=False)
+    if response.status_code != 200:
+        raise ValueError(f"{name} Alpaca Paper 账户身份读取失败：HTTP {response.status_code}")
+    payload = response.json()
+    identity = payload.get("id") if isinstance(payload, dict) else None
+    if not identity:
+        raise ValueError(f"{name} Alpaca Paper 未返回账户身份")
+    return identity
+
+
 def verify_bindings(accounts, pinned=None):
     pinned = pinned or {}
     identities = {name: item.get("account", {}).get("id") for name, item in accounts.items()}

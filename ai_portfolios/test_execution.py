@@ -368,3 +368,55 @@ def test_an_incomplete_round_cannot_be_executed(round_dir):
     write(round_dir / "round.json", {**read(round_dir / "round.json"), "status": "partial_failure"})
     with pytest.raises(ValueError, match="归属不一致"):
         execution.execute("claude", round_dir, CONFIG, getter=getter_for(), at=TIME)
+
+
+def test_sub_second_clock_skew_is_waited_out_not_clamped():
+    """A quote that just arrived can be timestamped a shade ahead of a local clock running behind.
+
+    Measured on the first live trading day: NVDA -0.172s, WMT -0.170s, which rejected both teams'
+    entire plans. Waiting for the instant to pass is honest; zeroing the age would not be.
+    """
+    slept = []
+    ahead = {"MSFT": quote(at=TIME + timedelta(milliseconds=200))}
+    settled = execution.settle_quotes(ahead, TIME, sleep=slept.append)
+    assert slept and 0.2 < slept[0] < 1.0
+    assert settled >= TIME
+
+
+def test_a_quote_already_in_the_past_is_not_waited_on():
+    slept = []
+    assert execution.settle_quotes({"MSFT": quote(at=TIME - timedelta(seconds=5))}, TIME, sleep=slept.append) == TIME
+    assert slept == []
+
+
+def test_a_clock_genuinely_wrong_stops_the_round(monkeypatch):
+    # Beyond a couple of seconds this is a broken machine clock, and waiting cannot fix it.
+    far = {"MSFT": quote(at=TIME + timedelta(seconds=30))}
+    with pytest.raises(ValueError, match="时钟偏差"):
+        execution.settle_quotes(far, TIME, sleep=lambda s: None)
+
+
+def test_settling_runs_before_the_plan_is_priced(round_dir, monkeypatch):
+    # The whole plan used to be rejected when any one symbol looked like it came from the future.
+    calls = []
+    monkeypatch.setattr(execution, "settle_quotes", lambda q, at, sleep=None: calls.append(at) or at)
+    execution.execute("claude", round_dir, CONFIG, submit_orders=False, getter=getter_for(), at=TIME)
+    assert calls == [TIME]
+
+
+def test_live_quote_uses_clock_after_broker_reads(round_dir, monkeypatch):
+    # The account/quote requests may take over two seconds. Their fresh quote must
+    # not look future-dated against the timestamp captured at execute() entry.
+    job = read(round_dir / "round.json")
+    job.update(engine_id="codex_engine", providers=["gpt"])
+    write(round_dir / "round.json", job)
+    write(round_dir / "gpt_status.json", read(round_dir / "claude_status.json"))
+    times = iter((TIME, TIME + timedelta(seconds=2.2)))
+    monkeypatch.setattr(execution, "now", lambda: next(times))
+    fresh_quote = {"MSFT": quote(at=TIME + timedelta(seconds=2.1))}
+
+    record = execution.execute("gpt", round_dir, CONFIG, submit_orders=False,
+                               getter=getter_for(quotes=fresh_quote))
+
+    assert record["engine_id"] == "codex_engine" and record["mode"] == "dry_run"
+    assert record["plan"]["orders"][0]["symbol"] == "MSFT"

@@ -70,11 +70,11 @@ async function loadDetail() {
   if(d.memory_claims?.length){host.append(element('h3','模型自报的未经证据支持的记忆性说法'));d.memory_claims.forEach(m=>host.append(element('p','• '+m,'hint')));}
   host.append(element('h3','现金与数据缺口'),element('p',d.cash_reason)); (d.evidence_gaps||[]).forEach(g=>host.append(element('p','• '+g,'hint')));
 }
-function buttons() {document.querySelectorAll('#run-claude,#run-gpt,#run-both,#refresh').forEach(b=>b.disabled=busy||!!state?.active||['run-gpt','run-both'].includes(b.id));const active=state?.active;$('progress').hidden=!active;if(active)$('progress').textContent='正在运行：'+active.stage+' · '+time(active.started_at)+'。结果将自动出现，不要重复点击。';}
+function buttons() {document.querySelectorAll('#run-claude,#refresh').forEach(b=>b.disabled=busy||!!state?.active);const active=state?.active;$('progress').hidden=!active;if(active)$('progress').textContent='正在运行：'+active.stage+' · '+time(active.started_at)+'。结果将自动出现，不要重复点击。';}
 async function reload() {
   const data=await api('/api/state');state=data;
-  if(!initialized){for(const name of ['claude','gpt'])$(name+'-prompt').value=data.prompts[name]; initialized=true;}
-  accountCard('claude');accountCard('gpt');renderRecords();buttons();$('gpt-prompt').disabled=true;$('same-prompt').disabled=true;if(view==='accounts')renderTables();if(view==='gpt-lab')renderGptLab().catch(e=>message(e.message,true));
+  if(!initialized){$('claude-prompt').value=data.prompts.claude;$('gpt-prompt').value=data.prompts.gpt; initialized=true;}
+  accountCard('claude');accountCard('gpt');renderRecords();buttons();if(view==='accounts')renderTables();if(view==='gpt-lab')renderGptLab().catch(e=>message(e.message,true));
   $('rules-text').textContent='共同股票池 '+state.rules.universe.length+' 只 · 最多 '+state.rules.max_positions+' 只正仓位 · 单股目标不超过 '+(state.rules.max_weight*100)+'% · 总目标仓位不超过 '+(state.rules.max_invested*100)+'%。'; $('instructions').textContent=state.research_instructions;
   $('last-update').textContent='面板更新 '+new Date().toLocaleTimeString('zh-CN',{hour12:false})+' · 账户需手动刷新';
   if(state.connection_error)message(state.connection_error,true);
@@ -86,11 +86,10 @@ async function run(providers){await action(async()=>{const r=await api('/api/run
 document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{show(b.dataset.view);if(!['compose','accounts','gpt-lab'].includes(view))loadDetail().catch(e=>message(e.message,true));});
 document.querySelectorAll('[data-filter]').forEach(b=>b.onclick=()=>{filter=b.dataset.filter;document.querySelectorAll('[data-filter]').forEach(x=>x.classList.toggle('selected',x===b));renderRecords();});
 document.querySelectorAll('[data-copy]').forEach(b=>b.onclick=async()=>{try{await navigator.clipboard.writeText($(b.dataset.copy).textContent);message('已复制。');}catch{message('浏览器未允许复制，请直接选中文本复制。',true);}});
-for(const name of ['claude','gpt'])$(name+'-prompt').addEventListener('input',()=>{dirty=true;});
-$('same-prompt').onclick=()=>{$('gpt-prompt').value=$('claude-prompt').value;dirty=true;message('已复制到 GPT 草稿，历史记录没有改变。');};
-$('save').onclick=()=>action(async()=>{await api('/api/prompts',prompts());dirty=false;message('两份指令草稿已保存。');});
+$('claude-prompt').addEventListener('input',()=>{dirty=true;});$('gpt-prompt').addEventListener('input',()=>{dirty=true;});
+$('save').onclick=()=>action(async()=>{await api('/api/prompts',prompts());dirty=false;message('Claude 与 Codex 的独立任务已保存，将用于下一次自动交易。');});
 $('refresh').onclick=()=>action(async()=>{await api('/api/refresh',{});message('两个 Paper 账户已重新读取。');});
-$('run-claude').onclick=()=>run(['claude']);$('run-gpt').onclick=()=>run(['gpt']);$('run-both').onclick=()=>run(['claude','gpt']);
+$('run-claude').onclick=()=>run(['claude']);
 window.addEventListener('beforeunload',e=>{if(dirty){e.preventDefault();e.returnValue='';}});
 reload().catch(e=>message('连接本地服务失败：'+e.message,true));
 setInterval(()=>{if(!busy)reload().catch(()=>{$('last-update').textContent='本地服务暂时不可达，当前为上次显示的记录';});},5000);

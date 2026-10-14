@@ -1,3 +1,4 @@
+import json
 from copy import deepcopy
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -6,10 +7,13 @@ import pytest
 
 from ai_portfolios.book import fresh_quote, initial_book, record_equity, settle
 from ai_portfolios.common import APP, parse_time, read
-from ai_portfolios.models import validate
+from ai_portfolios.models import quality_flags, validate
 from ai_portfolios.prompt_bench import inject, score
 
-CONFIG = read(APP / "config.json")
+REAL_CONFIG = read(APP / "config.json")
+# Most cases here exercise one position at a time; the participation floor is a portfolio-level rule
+# and gets its own tests below rather than masking every specific breach these cases are about.
+CONFIG = {**REAL_CONFIG, "min_invested": 0}
 TIME = datetime(2026, 10, 9, 15, 0, tzinfo=timezone.utc)
 
 
@@ -77,8 +81,10 @@ def test_invented_reference_rejected():
 def test_other_stock_news_cannot_support_trade():
     data = packet()
     data["evidence"][1]["symbol"] = "NVDA"
-    with pytest.raises(ValueError, match="symbol-specific"):
+    # The message must name the symbol: with nine positions a retry cannot fix "some position".
+    with pytest.raises(ValueError, match="AAPL") as caught:
         validate(decision(), CONFIG, data, initial_book(100000))
+    assert "evidence_ids" in str(caught.value)
 
 
 def test_omitted_holding_rejected():
@@ -261,21 +267,21 @@ def test_event_invalidation_does_not_need_a_price_reference():
     assert validate(plan, CONFIG, packet(), initial_book(100000))
 
 
-def test_unattributed_macro_statement_rejected():
+def test_unattributed_macro_statement_is_recorded_not_rejected():
+    # Losing a trading day is worse than an untraceable sentence that stays visible in the archive.
     plan = decision()
     plan["overview"] = "美联储可能降息，因此建立仓位"
-    with pytest.raises(ValueError, match="Unattributed macro"):
-        validate(plan, CONFIG, packet(), initial_book(100000))
+    assert validate(plan, CONFIG, packet(), initial_book(100000))
+    assert quality_flags(plan)["unattributed_macro"] == ["美联储"]
 
 
-def test_macro_statement_in_a_thesis_is_also_caught():
+def test_macro_statement_in_a_thesis_is_also_flagged():
     plan = decision()
     plan["positions"][0]["thesis"] = "油价大涨会推高这家公司的收入，因此买入"
-    with pytest.raises(ValueError, match="Unattributed macro"):
-        validate(plan, CONFIG, packet(), initial_book(100000))
+    assert quality_flags(plan)["unattributed_macro"] == ["油价"]
 
 
-def test_macro_statement_allowed_when_attributed_to_a_news_quote():
+def test_an_attributed_macro_statement_is_not_flagged():
     data = packet()
     data["evidence"][1]["summary"] = "报道称美联储可能降息，公司称需求稳定。"
     plan = decision()
@@ -286,11 +292,25 @@ def test_macro_statement_allowed_when_attributed_to_a_news_quote():
 
 
 def test_macro_claim_cannot_cite_a_price_feature():
+    # Filing a claim is still checked: a macro_claims entry must point at news it can be read in.
     plan = decision()
     plan["overview"] = "油价大涨"
     plan["macro_claims"] = [{"claim": "油价大涨", "evidence_id": "price:AAPL", "quote": "last_close"}]
     with pytest.raises(ValueError, match="wrong kind"):
         validate(plan, CONFIG, packet(), initial_book(100000))
+
+
+def test_an_earnings_driver_is_a_known_false_positive_of_the_flag():
+    """"Profit may come from oil" names a business driver and has nothing to cite, yet it is flagged.
+
+    Recorded rather than fixed: for an energy name, oil IS the fundamental, and a string matcher
+    cannot separate that from a claim about the oil market. This is the reason the flag stopped
+    being a rejection - it over-reports, and a metric that over-reports must not cost a trading day.
+    Read the flag before acting on it.
+    """
+    plan = decision()
+    plan["positions"][0]["thesis"] = "该季度利润改善可能来自油价，因此只给小仓位并等待更多证据"
+    assert quality_flags(plan)["unattributed_macro"] == ["油价"]
 
 
 def test_missing_changes_vs_last_rejected():
@@ -374,3 +394,142 @@ def test_failure_kind_separates_retry_later_from_broken(stdout, kind):
     assert result["failure_kind"] == kind
     # A quota pause and an expired login both need a human, so both carry a hint; a defect does not.
     assert ("error_hint" in result) is (kind != "cli_error")
+
+
+def test_a_book_below_the_participation_floor_is_rejected():
+    # Standing aside is unavailable: an account that never participates teaches nothing, and the
+    # mandate alone did not move it (measured at 26% invested over ten repeats).
+    with pytest.raises(ValueError, match="participation floor"):
+        validate(decision(), REAL_CONFIG, packet(), initial_book(100000))
+
+
+def test_the_floor_is_reported_only_after_the_specific_breaches():
+    plan = decision()
+    plan["positions"][0]["evidence_ids"].append("made_up")
+    # Both are wrong; the invented citation is the one worth telling the model about.
+    with pytest.raises(ValueError, match="Invented"):
+        validate(plan, REAL_CONFIG, packet(), initial_book(100000))
+
+
+def test_a_first_position_may_say_only_that_it_is_new():
+    plan = decision()
+    plan["positions"][0]["changes_vs_last"] = "首次建仓。"
+    assert validate(plan, CONFIG, packet(), initial_book(100000))
+
+
+def test_a_held_name_must_say_more_than_that(packet_fixture=None):
+    book = initial_book(100000)
+    book["last_decision"] = {"positions": [{"symbol": "AAPL", "target_weight": 0.1}]}
+    book["holdings"]["AAPL"] = {"shares": 1, "last_mark": 100}
+    plan = decision()
+    plan["positions"][0]["changes_vs_last"] = "继续。"
+    with pytest.raises(ValueError, match="changes_vs_last"):
+        validate(plan, CONFIG, packet(), book)
+
+
+@pytest.mark.parametrize("changes", ["", "   ", None])
+def test_changes_vs_last_can_never_be_empty(changes):
+    plan = decision()
+    plan["positions"][0]["changes_vs_last"] = changes
+    with pytest.raises(ValueError, match="changes_vs_last"):
+        validate(plan, CONFIG, packet(), initial_book(100000))
+
+
+def test_a_macro_term_inside_a_conditional_needs_no_source():
+    # "If oil falls back" cites nothing because there is nothing to cite; it is a sensitivity.
+    plan = decision()
+    plan["positions"][0]["thesis"] = "油价若回落，这里的盈利提升可能不持续，所以只给小仓位"
+    assert validate(plan, CONFIG, packet(), initial_book(100000))
+
+
+def test_an_assertion_in_the_same_sentence_as_a_conditional_is_still_flagged():
+    plan = decision()
+    plan["overview"] = "油价因袭击大涨；若后续回落，这个判断要重看"
+    assert quality_flags(plan)["unattributed_macro"] == ["油价"]
+
+
+def test_a_synonym_in_the_claim_still_counts_as_attribution():
+    data = packet()
+    data["evidence"][1]["summary"] = "报道称原油价格因袭击大涨，公司称需求稳定。"
+    plan = decision()
+    plan["overview"] = "油价大涨推高这家公司的收入"
+    plan["macro_claims"] = [{"claim": "报道称原油价格因袭击大涨", "evidence_id": "news:AAPL:1",
+                             "quote": "报道称原油价格因袭击大涨"}]
+    plan["positions"][0]["evidence_quotes"][0]["quote"] = "公司称需求稳定"
+    assert validate(plan, CONFIG, data, initial_book(100000))
+
+
+class FakeProcess:
+    def __init__(self, payload):
+        self.returncode, self.stdout, self.stderr = 0, json.dumps(payload, ensure_ascii=False), ""
+
+
+def retrying_runner(monkeypatch, tmp_path, answers):
+    """Drive run_model with scripted CLI answers; no process, no network, no account."""
+    from ai_portfolios import models
+
+    sent = []
+
+    def fake_run(command, input=None, **kwargs):
+        sent.append(input)
+        return FakeProcess({"is_error": False, "structured_output": answers[len(sent) - 1]})
+
+    monkeypatch.setattr(models.subprocess, "run", fake_run)
+    monkeypatch.setattr(models, "model_command", lambda *a, **k: ["claude"])
+    monkeypatch.setattr(models, "model_environment", dict)
+    full = {"snapshot_id": "s", "frozen_at": TIME.isoformat(), "features": [], "errors": [], **packet()}
+    result = models.run_model("claude", full, initial_book(100000), CONFIG, tmp_path, "mandate", "shadow")
+    return result, sent
+
+
+def test_a_rejected_answer_gets_one_retry_carrying_the_exact_rejection(monkeypatch, tmp_path):
+    bad = decision()
+    bad["positions"][0]["evidence_quotes"][0]["quote"] = "这句话不在证据里"
+    result, sent = retrying_runner(monkeypatch, tmp_path, [bad, decision()])
+    assert result["status"] == "validated" and result["attempts"] == 2
+    assert "verbatim" in result["rejections_before_acceptance"][0]
+    # The retry must tell the model what was wrong, or it is just a second dice roll.
+    assert "verbatim" in sent[1] and "REJECTED" in sent[1]
+    assert len(sent) == 2
+
+
+def test_a_clean_answer_is_never_retried(monkeypatch, tmp_path):
+    result, sent = retrying_runner(monkeypatch, tmp_path, [decision()])
+    assert result["status"] == "validated" and result["attempts"] == 1
+    assert len(sent) == 1 and "rejections_before_acceptance" in result
+
+
+def test_two_rejections_end_the_round_with_no_decision(monkeypatch, tmp_path):
+    bad = decision()
+    bad["positions"][0]["evidence_ids"].append("made_up")
+    result, sent = retrying_runner(monkeypatch, tmp_path, [bad, bad])
+    assert result["status"] == "failed" and "decision" not in result
+    # Bounded: a third roll would start selecting the answer we like rather than the one we got.
+    assert len(sent) == 2
+
+
+def test_both_attempts_are_archived_separately(monkeypatch, tmp_path):
+    bad = decision()
+    bad["positions"][0]["evidence_quotes"][0]["quote"] = "这句话不在证据里"
+    retrying_runner(monkeypatch, tmp_path, [bad, decision()])
+    assert (tmp_path / "claude_response.txt").exists()
+    assert (tmp_path / "claude_response_retry1.txt").exists()
+    # The rejected answer stays readable: a retry must never overwrite what was actually returned.
+    assert "这句话不在证据里" in (tmp_path / "claude_response.txt").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("break_it,field", [
+    (lambda p: p.update(action="双倍梭哈"), "action"),
+    (lambda p: p.update(horizon_days=0), "horizon"),
+    (lambda p: p.update(confidence=1.0), "confidence"),
+    (lambda p: p.update(changes_vs_last="  "), "changes_vs_last"),
+    (lambda p: p.update(fact_refs=[]), "fact references"),
+    (lambda p: p.update(target_weight=0.99), "limit violation"),
+])
+def test_every_position_level_rejection_names_the_symbol(break_it, field):
+    """A retry can only fix what the rejection identifies, and a book holds up to ten names."""
+    plan = decision()
+    break_it(plan["positions"][0])
+    with pytest.raises(ValueError) as caught:
+        validate(plan, CONFIG, packet(), initial_book(100000))
+    assert "AAPL" in str(caught.value) and field in str(caught.value)

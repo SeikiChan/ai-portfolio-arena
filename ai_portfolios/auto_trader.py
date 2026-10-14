@@ -2,20 +2,32 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
 import time as wait
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import execution, packet_broker
-from .common import APP, ROOT, read, stamp, write
+from .common import APP, ROOT, now, parse_time, read, stamp, write
 from .credentials import paper_credentials
+from .paper_accounts import account_identity
+from .console_store import load_prompts
 
 EASTERN = ZoneInfo("America/New_York")
-RUN_AT = time(10, 0)  # assumption: wait 30 minutes after the regular-session open.
+RUN_AT = time(9, 35)  # five minutes into the regular session, not at the bell.
+# Why not 09:30. Two things are at their worst in the first minutes: the opening auction's
+# imbalance, which is priced into whatever limit we cross, and IEX quote staleness on the
+# thinner names - and a quote older than MAX_QUOTE_AGE_SECONDS stops the entire plan, not
+# just its own leg. Five minutes costs five minutes of drift and buys margin on both.
+# The grace below still matters: a late or shortened open means the session may not be
+# running yet even at 09:35, and a date once claimed as closed is never retried, so a
+# clock that flips a moment late would silently swallow a whole trading day.
+OPEN_GRACE_SECONDS = 600
 ENGINES = ("claude_engine", "codex_engine")
 STATE_ROOT = ROOT / "reports" / "auto_trader"
 POLL_SECONDS = 30
@@ -27,9 +39,38 @@ def engine_timeout(engine_id, config):
 
 
 def _open_for_both():
+    account_ids = {}
     for provider in ("claude", "gpt"):
         credentials = paper_credentials(only=provider)[provider]
+        account_ids[provider] = account_identity(provider, credentials)
         execution.session_open(credentials)
+    if account_ids["claude"] == account_ids["gpt"]:
+        raise ValueError("Claude 与 Codex 绑定到了同一个 Alpaca Paper 账户；两队交易已停止")
+
+
+def _seconds_until(moment):
+    return (parse_time(moment) - now()).total_seconds() if moment else None
+
+
+def _wait_for_open(grace=OPEN_GRACE_SECONDS):
+    """None once both accounts see an open session, else the closed message.
+
+    Waits only when the open is actually imminent, so a weekend still answers on the first check.
+    """
+    waited = 0
+    while True:
+        try:
+            _open_for_both()
+            return None
+        except ValueError as exc:
+            if "当前不在美股常规交易时段" not in str(exc):
+                raise
+            clock = execution.session_open(paper_credentials(only="claude")["claude"], require_open=False)
+            remaining = _seconds_until(clock.get("next_open"))
+            if remaining is None or waited >= grace or remaining > grace - waited:
+                return str(exc)
+            wait.sleep(min(POLL_SECONDS, max(1, remaining + 1)))
+            waited += POLL_SECONDS
 
 
 def run_daily(trading_date=None):
@@ -40,18 +81,21 @@ def run_daily(trading_date=None):
     if state_file.exists():
         return read(state_file)
 
+    mandates = load_prompts()
+    providers = {"claude_engine": "claude", "codex_engine": "gpt"}
+    mandate_hashes = {engine_id: hashlib.sha256(mandates[provider].encode("utf-8")).hexdigest()
+                      for engine_id, provider in providers.items()}
+
     # Avoid collecting data on weekends/holidays. Alpaca's clock is the source of truth.
-    try:
-        _open_for_both()
-    except ValueError as exc:
-        if "当前不在美股常规交易时段" not in str(exc):
-            raise
+    closed = _wait_for_open()
+    if closed:
         state = {"trading_date": trading_date, "status": "market_closed", "checked_at": stamp(),
-                 "error": str(exc), "orders_submitted": False}
+                 "error": closed, "orders_submitted": False}
         write(state_file, state, exclusive=True)
         return state
     state = {"trading_date": trading_date, "status": "started", "started_at": stamp(),
              "schedule_time_et": RUN_AT.strftime("%H:%M"), "engines": {},
+             "mandate_sha256": mandate_hashes,
              "classification": "assumption: one automatic Paper trading cycle per session"}
     write(state_file, state, exclusive=True)
     try:
@@ -63,9 +107,14 @@ def run_daily(trading_date=None):
     state.update(packet_id=pointer["packet_id"], packet_sha256=pointer["packet_sha256"], packet_frozen_at=pointer["frozen_at"])
     write(state_file, state)
 
-    for engine_id in ENGINES:
+    def launch(engine_id):
+        provider = providers[engine_id]
+        mandate_directory = STATE_ROOT / "mandates" / trading_date
+        mandate_directory.mkdir(parents=True, exist_ok=True)
+        mandate_file = mandate_directory / f"{engine_id}.txt"
+        mandate_file.write_text(mandates[provider], encoding="utf-8")
         command = [sys.executable, "-m", "engines.run", "--engine", engine_id,
-                   "--packet-id", pointer["packet_id"]]
+                   "--packet-id", pointer["packet_id"], "--mandate-file", str(mandate_file)]
         try:
             proc = subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
                                   encoding="utf-8", errors="replace",
@@ -85,15 +134,22 @@ def run_daily(trading_date=None):
                 execution_status = "partial_failure"
             else:
                 execution_status = exec_result.get("mode", "unknown")
-            state["engines"][engine_id] = {"exit_code": proc.returncode,
+            return {"exit_code": proc.returncode,
                 "round_id": details.get("round_id"), "status": details.get("status"),
                 "execution": exec_result,
                 "execution_status": execution_status,
                 "error": (proc.stderr or (proc.stdout if proc.returncode else ""))[-1000:] or None}
         except subprocess.TimeoutExpired:
-            state["engines"][engine_id] = {"status": "interrupted", "error": "daily engine process timed out"}
-        state["updated_at"] = stamp()
-        write(state_file, state)
+            return {"status": "interrupted", "error": "daily engine process timed out"}
+        except OSError as exc:
+            return {"status": "failed", "error": type(exc).__name__}
+
+    with ThreadPoolExecutor(max_workers=len(ENGINES)) as pool:
+        pending = {pool.submit(launch, engine_id): engine_id for engine_id in ENGINES}
+        for future in as_completed(pending):
+            state["engines"][pending[future]] = future.result()
+            state["updated_at"] = stamp()
+            write(state_file, state)
 
     successes = sum(row.get("status") == "completed" and row.get("execution_status") not in
                     {"failed", "submission_unknown", "partial_failure"}
