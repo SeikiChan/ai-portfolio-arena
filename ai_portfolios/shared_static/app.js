@@ -5,10 +5,90 @@ const money = value => value==null||!Number.isFinite(Number(value)) ? "未知" :
 const pct = value => value==null||!Number.isFinite(Number(value)) ? "未知" : (Number(value)*100).toFixed(1)+"%";
 const time = value => value&&!Number.isNaN(Date.parse(value)) ? new Date(value).toLocaleString("zh-CN",{hour12:false}) : (value||"—");
 const picked={}, tabs={};
+const feedState={team:"all",action:"all",limit:8};
 let renderedSignature=null;
+let currentTeams=[];
+const teamName=team=>team.engine_id==="codex_engine"?"Codex":"Claude";
+const actionGroup=action=>({new:"buy",add:"buy",trim:"sell",exit:"sell",hold:"hold",watch:"hold"})[action]||"other";
+const actionLabel=action=>({new:"新建",add:"加仓",hold:"持有",trim:"减持",exit:"退出",watch:"观察"})[action]||"组合";
+const actionGroupLabel=group=>({buy:"买入 / 加仓",sell:"减持 / 退出",hold:"持有 / 观察"})[group]||"全部动态";
+const statusLabel=status=>({validated:"通过校验",completed:"已完成",failed:"失败",unknown:"状态未知"})[status]||status||"状态未知";
 function link(url) {
   if(!/^https:\/\//i.test(url||"")) return null;
   const a=el("a","原文 ↗"); a.href=url; a.target="_blank"; a.rel="noopener noreferrer"; return a;
+}
+function feedTrace(step) {
+  const card=el("article",null,"feed-trace "+(step.kind||""));
+  card.append(el("b",step.kind==="model"?"模型研究步骤 "+step.step+(step.done?" · 完成":" · 请求资料"):"工具调用 "+step.step+" · "+(step.status||"状态未知")));
+  if(step.kind==="model"){
+    (step.actions||[]).forEach(a=>card.append(el("p",(a.tool||"工具")+"："+(a.query||a.url||a.expression||"—"))));
+  }else{
+    const a=step.action||{};card.append(el("p",(a.tool||"工具")+"："+(a.query||a.url||a.expression||"—")));
+    const source=link(step.url);if(source)card.append(source);
+    if(step.text)card.append(el("pre",step.text+(step.excerpt_truncated?"\n[页面摘录已截断]":"")));
+    card.append(el("small",(step.classification||"unknown")+" · 来源哈希 "+(step.source_sha256||"未提供")));
+  }
+  return card;
+}
+function feedDecision(position) {
+  const group=actionGroup(position.action),card=el("article",null,"feed-decision "+group),head=el("div",null,"feed-decision-head");
+  head.append(el("strong",position.symbol||"未命名标的"),el("span",actionLabel(position.action)+" · 目标 "+pct(position.target_weight),"decision-tag"));
+  card.append(head);
+  if(position.thesis)card.append(el("p",position.thesis,"feed-thesis"));
+  if(position.changes_vs_last)card.append(el("p","相对上轮："+position.changes_vs_last,"feed-change"));
+  if(position.evidence_ids?.length)card.append(el("p","引用证据："+position.evidence_ids.join(" · "),"feed-evidence"));
+  card.append(el("p","复核期限 "+(position.horizon_days??"—")+" 天 · 信心 "+pct(position.confidence),"feed-detail"));
+  return card;
+}
+function feedCard(item,isLatest) {
+  const {team,round}=item,name=teamName(team),trace=round.research_trace||[],positions=round.decision_details||[];
+  const card=el("article",null,"feed-card "+name.toLowerCase()),head=el("div",null,"feed-card-head"),identity=el("div",null,"feed-identity");
+  identity.append(el("span",name==="Codex"?"G":"C","team-avatar"),el("strong",name),el("span",statusLabel(round.status),"status-tag "+(round.status||"unknown")));
+  if(isLatest)identity.append(el("span","最新一轮","latest-tag"));
+  head.append(identity,el("time",time(round.completed_at),"feed-time"));card.append(head);
+  card.append(el("p","轮次 "+(round.round_id||round.id||"未知")+" · 实验 "+(round.experiment_id||"未记录"),"feed-round"));
+  if(round.error)card.append(el("p","研究失败："+round.error,"alert"));
+  if(round.execution_error)card.append(el("p","执行中止："+round.execution_error,"alert"));
+  if(round.overview)card.append(el("p",round.overview,"feed-overview"));
+  else if(!round.error)card.append(el("p","本轮没有可展示的决策摘要。","muted"));
+  if(positions.length){
+    const decisions=el("div",null,"feed-decisions");
+    positions.forEach(position=>decisions.append(feedDecision(position)));
+    card.append(decisions);
+  }else if(!round.error){card.append(el("p","本轮没有通过校验的组合决定。","muted"));}
+  if(round.cash_reason)card.append(el("p","现金安排："+round.cash_reason,"feed-cash"));
+  const audit=el("details",null,"feed-audit"),summary=el("summary","查看完整回复与研究记录 · "+trace.length+" 个研究步骤");
+  audit.append(summary);
+  audit.append(el("h4","模型最终回复"),el("pre",round.response||round.error||"没有保存模型回复。"));
+  audit.append(el("h4","公开研究过程"));
+  if(trace.length)trace.forEach(step=>audit.append(feedTrace(step)));
+  else audit.append(el("p","本轮没有保存公开研究工具对话。","muted"));
+  card.append(audit);
+  if(round.broker_orders?.length){
+    const orders=el("details",null,"feed-orders");orders.append(el("summary","查看实际委托状态 · "+round.broker_orders.length+" 项"));
+    round.broker_orders.forEach(order=>{const q=order.request||{};orders.append(el("p",(q.side||"—")+" "+(q.qty||"—")+" 股 "+(q.symbol||"—")+" · "+(order.outcome||"未知")+" · "+(order.broker_status||order.broker_message||order.error||""),"order"));});
+    card.append(orders);
+  }
+  return card;
+}
+function filterButton(label,selected,onClick) {
+  const button=el("button",label,"filter-chip"+(selected?" active":""));button.type="button";button.setAttribute("aria-pressed",selected?"true":"false");button.onclick=onClick;return button;
+}
+function renderFeed(teams) {
+  const events=(teams||[]).flatMap(team=>(team.rounds||[]).map(round=>({team,round})))
+    .sort((a,b)=>(Date.parse(b.round.completed_at)||0)-(Date.parse(a.round.completed_at)||0));
+  const latestByTeam=new Map();events.forEach(({team,round})=>{if(!latestByTeam.has(team.team_id))latestByTeam.set(team.team_id,round.id);});
+  const teamFilters=$("team-filters"),actionFilters=$("action-filters");teamFilters.replaceChildren();actionFilters.replaceChildren();
+  teamFilters.append(filterButton("全部团队",feedState.team==="all",()=>{feedState.team="all";feedState.limit=8;renderFeed(currentTeams);}));
+  teams.forEach(team=>teamFilters.append(filterButton(teamName(team),feedState.team===team.team_id,()=>{feedState.team=team.team_id;feedState.limit=8;renderFeed(currentTeams);})));
+  actionFilters.append(filterButton("全部动态",feedState.action==="all",()=>{feedState.action="all";feedState.limit=8;renderFeed(currentTeams);}));
+  [["buy","买入 / 加仓"],["sell","减持 / 退出"],["hold","持有 / 观察"]].forEach(([id,label])=>actionFilters.append(filterButton(label,feedState.action===id,()=>{feedState.action=id;feedState.limit=8;renderFeed(currentTeams);})));
+  const selected=events.filter(({team,round})=>(feedState.team==="all"||feedState.team===team.team_id)&&(feedState.action==="all"||(round.decision_details||[]).some(p=>actionGroup(p.action)===feedState.action)));
+  const visible=selected.slice(0,feedState.limit),feed=$("feed");feed.replaceChildren();
+  if(!selected.length)feed.append(el("p","没有符合筛选条件的已发布轮次。","empty-feed"));
+  else visible.forEach(item=>feed.append(feedCard(item,latestByTeam.get(item.team.team_id)===item.round.id)));
+  $("feed-count").textContent=selected.length?"显示 "+visible.length+" / "+selected.length+" 轮":"0 轮";
+  if(visible.length<selected.length){const more=el("button","加载更早轮次","load-more");more.type="button";more.onclick=()=>{feedState.limit+=8;renderFeed(currentTeams);};feed.append(more);}
 }
 function chart(points) {
   const box=el("section",null,"chart");
@@ -28,6 +108,12 @@ function chart(points) {
   flush();
   rows.forEach((p,i)=>{const dot=s("circle",{cx:x(i),cy:y(p.equity),r:5,class:"dot"}),title=s("title");title.textContent=time(p.at)+" · "+money(p.equity)+" · "+(p.experiment_id||"版本未知");dot.append(title);svg.append(dot);});
   box.append(svg,el("p",rows.length+" 个真实快照点。实验版本变更处断线；仅为采样时点，不是完整盘中走势。","muted"));
+  return box;
+}
+function chartView(team) {
+  const name=teamName(team),box=chart(team.equity_history);box.classList.add("team-chart",name.toLowerCase());
+  const head=el("div",null,"chart-team-head");head.append(el("strong",name),el("span",team.status==="available"?"档案可读":"等待发布","pill"));
+  box.prepend(head,el("p","最近发布 "+time(team.published_at)+" · "+(team.rounds?.length||0)+" 轮档案","muted"));
   return box;
 }
 function decision(round) {
@@ -93,8 +179,8 @@ function execution(round) {
   }return host;
 }
 function teamView(team) {
-  const name=team.engine_id==="codex_engine"?"Codex":"Claude",box=el("article",null,"team "+name.toLowerCase()),head=el("div",null,"team-head");
-  head.append(el("h2",name+" 团队"),el("span",team.status==="available"?"档案可读":"等待发布","pill"));box.append(head,el("p","最近发布 "+time(team.published_at)+" · "+(team.rounds?.length||0)+" 轮档案","muted"),chart(team.equity_history));
+  const name=teamName(team),box=el("article",null,"team "+name.toLowerCase()),head=el("div",null,"team-head");
+  head.append(el("h2",name+" 团队"),el("span",team.status==="available"?"档案可读":"等待发布","pill"));box.append(head,el("p","最近发布 "+time(team.published_at)+" · "+(team.rounds?.length||0)+" 轮档案","muted"));
   (team.rejected_rounds||[]).forEach(r=>box.append(el("p","未发布轮次 "+r.round_id+"："+r.reason,"alert")));
   if(!team.rounds?.length){box.append(el("p",team.note||"暂无轮次","muted"));return box;}
   const selector=el("select");selector.setAttribute("aria-label","选择 "+name+" 轮次");
@@ -114,7 +200,7 @@ async function refresh(){
   try{const response=await fetch("/api/teams",{cache:"no-store"}),data=await response.json();if(!response.ok)throw Error(data.error||"发布暂不可读");
     const signature=JSON.stringify((data.teams||[]).map(team=>[team.team_id,team.published_at,team.status]));
     $("message").textContent="";
-    if(signature!==renderedSignature){$("teams").replaceChildren(...(data.teams||[]).map(teamView));renderedSignature=signature;}
+    if(signature!==renderedSignature){currentTeams=data.teams||[];$("charts").replaceChildren(...currentTeams.map(chartView));renderFeed(currentTeams);$("teams").replaceChildren(...currentTeams.map(teamView));renderedSignature=signature;}
     $("updated").textContent="页面更新 "+new Date().toLocaleTimeString("zh-CN",{hour12:false});
   }catch(error){$("message").textContent="读取失败："+error.message;}
 }
