@@ -33,7 +33,13 @@ ELISION = (chr(10) * 2 + "[INPUT 段已省略：它包含本轮账户现金与�
 
 
 def branch_name():
-    head = ROOT / ".git" / "HEAD"
+    git_dir = ROOT / ".git"
+    if git_dir.is_file():
+        pointer = git_dir.read_text(encoding="utf-8").strip()
+        if not pointer.startswith("gitdir: "):
+            return None
+        git_dir = (ROOT / pointer.removeprefix("gitdir: ")).resolve()
+    head = git_dir / "HEAD"
     if not head.exists():
         return None
     text = head.read_text(encoding="utf-8").strip()
@@ -46,7 +52,10 @@ def prompt_text(directory, provider):
     if not path.exists():
         return None, None, 0
     full = path.read_text(encoding="utf-8")
-    head, _, _ = full.partition(chr(10) + "INPUT:" + chr(10))
+    # Both engine prompt delimiters must remove private decision input and raw research material.
+    head = full
+    for delimiter in ("\nINPUT:\n", "\n输入：\n"):
+        head = head.partition(delimiter)[0]
     return head + ELISION, hashlib.sha256(full.encode("utf-8")).hexdigest(), len(full)
 
 
@@ -61,6 +70,8 @@ def provider_entry(directory, provider, summary, job):
     broker_orders = execution.get("results", [])
     account = execution.get("account_observed", {})
     return {"id": f"{summary['round_id']}:{provider}", "round_id": summary["round_id"], "provider": provider,
+            "experiment_id": job.get("experiment_id"), "research_enabled": job.get("research_enabled", False),
+            "decision_packet_sha256": job.get("decision_packet_sha256"),
             "status": status.get("status", "unknown"), "completed_at": status.get("completed_at") or summary.get("at"),
             "model_requested": status.get("model_requested"), "error": status.get("error"),
             "user_prompt": (job.get("user_prompts") or {}).get(provider, "本轮未记录指令全文；见 mandate_sha256。"),
