@@ -64,6 +64,8 @@ def identity(engine, config, mandate):
             "config": config, "instruction": engine.instruction("alpaca_paper"), "mandate": mandate,
             "research_instruction": INSTRUCTION, "schema": SCHEMA,
             "source": {p.name: digest(p) for p in (Path(__file__), Path(__file__).with_name("research_tools.py"))}}
+    if engine.engine_id == "codex_engine":
+        spec["feedback_source"] = digest(Path(__file__).parent / "codex_engine" / "feedback.py")
     mode = VERSION if enabled(engine.engine_id, config) else "packet-only-v1"
     return mode + "-" + _hash(spec)[:20]
 
