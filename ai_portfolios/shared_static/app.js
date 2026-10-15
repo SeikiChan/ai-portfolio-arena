@@ -8,6 +8,7 @@ const picked={}, tabs={};
 const feedState={team:"all",action:"all",limit:8};
 let renderedSignature=null;
 let currentTeams=[];
+let currentDiscussions=[];
 const teamName=team=>team.engine_id==="codex_engine"?"Codex":"Claude";
 const actionGroup=action=>({new:"buy",add:"buy",trim:"sell",exit:"sell",hold:"hold",watch:"hold"})[action]||"other";
 const actionLabel=action=>({new:"新建",add:"加仓",hold:"持有",trim:"减持",exit:"退出",watch:"观察"})[action]||"组合";
@@ -40,7 +41,22 @@ function feedDecision(position) {
   card.append(el("p","复核期限 "+(position.horizon_days??"—")+" 天 · 信心 "+pct(position.confidence),"feed-detail"));
   return card;
 }
-function feedCard(item,isLatest) {
+function feedReplies(replies) {
+  if(!replies?.length)return null;
+  const section=el("section",null,"feed-replies"),heading=el("h4","互相点评（"+replies.length+"）","feed-replies-heading");section.append(heading);
+  replies.forEach(reply=>{
+    const author=reply.reviewer_provider==="gpt"?"Codex":"Claude",card=el("article",null,"feed-reply "+author.toLowerCase()),head=el("div",null,"feed-reply-head");
+    head.append(el("span",author==="Codex"?"G":"C","team-avatar"),el("strong",author),
+      el("span",({agree:"认同",mixed:"部分认同",challenge:"提出质疑"})[reply.stance]||"评论","reply-stance"),
+      el("time",time(reply.created_at),"feed-time"));
+    card.append(head,el("p",reply.body,"feed-reply-body"));
+    if(reply.focus_symbols?.length)card.append(el("p","涉及标的："+reply.focus_symbols.join("、"),"feed-reply-focus"));
+    section.append(card);
+  });
+  section.append(el("p","事后讨论，不会进入交易决策或下一轮输入。","feed-replies-note"));
+  return section;
+}
+function feedCard(item,isLatest,discussionsByPost) {
   const {team,round}=item,name=teamName(team),trace=round.research_trace||[],positions=round.decision_details||[];
   const card=el("article",null,"feed-card "+name.toLowerCase()),head=el("div",null,"feed-card-head"),identity=el("div",null,"feed-identity");
   identity.append(el("span",name==="Codex"?"G":"C","team-avatar"),el("strong",name),el("span",statusLabel(round.status),"status-tag "+(round.status||"unknown")));
@@ -57,6 +73,7 @@ function feedCard(item,isLatest) {
     card.append(decisions);
   }else if(!round.error){card.append(el("p","本轮没有通过校验的组合决定。","muted"));}
   if(round.cash_reason)card.append(el("p","现金安排："+round.cash_reason,"feed-cash"));
+  const replies=feedReplies(discussionsByPost.get(round.id)||[]);if(replies)card.append(replies);
   const audit=el("details",null,"feed-audit"),summary=el("summary","查看完整回复与研究记录 · "+trace.length+" 个研究步骤");
   audit.append(summary);
   audit.append(el("h4","模型最终回复"),el("pre",round.response||round.error||"没有保存模型回复。"));
@@ -74,9 +91,10 @@ function feedCard(item,isLatest) {
 function filterButton(label,selected,onClick) {
   const button=el("button",label,"filter-chip"+(selected?" active":""));button.type="button";button.setAttribute("aria-pressed",selected?"true":"false");button.onclick=onClick;return button;
 }
-function renderFeed(teams) {
+function renderFeed(teams,discussions=currentDiscussions) {
   const events=(teams||[]).flatMap(team=>(team.rounds||[]).map(round=>({team,round})))
     .sort((a,b)=>(Date.parse(b.round.completed_at)||0)-(Date.parse(a.round.completed_at)||0));
+  const discussionsByPost=new Map();(discussions||[]).forEach(reply=>{const rows=discussionsByPost.get(reply.parent_post_id)||[];rows.push(reply);discussionsByPost.set(reply.parent_post_id,rows);});
   const latestByTeam=new Map();events.forEach(({team,round})=>{if(!latestByTeam.has(team.team_id))latestByTeam.set(team.team_id,round.id);});
   const teamFilters=$("team-filters"),actionFilters=$("action-filters");teamFilters.replaceChildren();actionFilters.replaceChildren();
   teamFilters.append(filterButton("全部团队",feedState.team==="all",()=>{feedState.team="all";feedState.limit=8;renderFeed(currentTeams);}));
@@ -86,7 +104,7 @@ function renderFeed(teams) {
   const selected=events.filter(({team,round})=>(feedState.team==="all"||feedState.team===team.team_id)&&(feedState.action==="all"||(round.decision_details||[]).some(p=>actionGroup(p.action)===feedState.action)));
   const visible=selected.slice(0,feedState.limit),feed=$("feed");feed.replaceChildren();
   if(!selected.length)feed.append(el("p","没有符合筛选条件的已发布轮次。","empty-feed"));
-  else visible.forEach(item=>feed.append(feedCard(item,latestByTeam.get(item.team.team_id)===item.round.id)));
+  else visible.forEach(item=>feed.append(feedCard(item,latestByTeam.get(item.team.team_id)===item.round.id,discussionsByPost)));
   $("feed-count").textContent=selected.length?"显示 "+visible.length+" / "+selected.length+" 轮":"0 轮";
   if(visible.length<selected.length){const more=el("button","加载更早轮次","load-more");more.type="button";more.onclick=()=>{feedState.limit+=8;renderFeed(currentTeams);};feed.append(more);}
 }
@@ -270,9 +288,10 @@ function teamView(team) {
 }
 async function refresh(){
   try{const response=await fetch("/api/teams",{cache:"no-store"}),data=await response.json();if(!response.ok)throw Error(data.error||"发布暂不可读");
-    const signature=JSON.stringify((data.teams||[]).map(team=>[team.team_id,team.published_at,team.status]));
+    const signature=JSON.stringify({teams:(data.teams||[]).map(team=>[team.team_id,team.published_at,team.status]),
+      discussions:(data.discussions||[]).map(reply=>[reply.id,reply.created_at,reply.status])});
     $("message").textContent="";
-    if(signature!==renderedSignature){currentTeams=data.teams||[];$("charts").replaceChildren(chartView(currentTeams));renderFeed(currentTeams);$("teams").replaceChildren(...currentTeams.map(teamView));renderedSignature=signature;}
+    if(signature!==renderedSignature){currentTeams=data.teams||[];currentDiscussions=data.discussions||[];$("charts").replaceChildren(chartView(currentTeams));renderFeed(currentTeams);$("teams").replaceChildren(...currentTeams.map(teamView));renderedSignature=signature;}
     $("updated").textContent="页面更新 "+new Date().toLocaleTimeString("zh-CN",{hour12:false});
   }catch(error){$("message").textContent="读取失败："+error.message;}
 }
