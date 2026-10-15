@@ -213,7 +213,7 @@ def run(engine_id, mandate=None, packet_id=None, config=None, output_root=None, 
                 write(rounds_root.parent / "executions" / round_id / "execution.json",
                       execution_result, exclusive=True)
         from .publish import DEFAULT_EXPORTS, TEAM_IDS, build
-        export = build(engine_id, TEAM_IDS[engine_id])
+        export = build(engine_id, TEAM_IDS[engine_id], fetch_portfolio_history=True)
         write(DEFAULT_EXPORTS[engine_id], export)
         return directory, job, execution_result
 
