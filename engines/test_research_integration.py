@@ -55,7 +55,7 @@ def test_round_uses_research_input_and_seals_failures(tmp_path, monkeypatch, pro
 
     monkeypatch.setattr(run.packet_broker, "claim", claim)
     monkeypatch.setattr(run, "read_one", account)
-    monkeypatch.setattr(publish, "build", lambda *args: {})
+    monkeypatch.setattr(publish, "build", lambda *args, **kwargs: {})
     monkeypatch.setitem(publish.DEFAULT_EXPORTS, engine_id, tmp_path / "export.json")
 
     def execute(*args, **kwargs):
