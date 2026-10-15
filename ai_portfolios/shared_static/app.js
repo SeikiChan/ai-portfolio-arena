@@ -90,28 +90,69 @@ function renderFeed(teams) {
   $("feed-count").textContent=selected.length?"显示 "+visible.length+" / "+selected.length+" 轮":"0 轮";
   if(visible.length<selected.length){const more=el("button","加载更早轮次","load-more");more.type="button";more.onclick=()=>{feedState.limit+=8;renderFeed(currentTeams);};feed.append(more);}
 }
-function chart(points) {
+function chart(points, options={}) {
   const box=el("section",null,"chart");
   box.append(el("div","PAPER 净值 / 已观察快照","eyebrow"));
-  const rows=(points||[]).filter(p=>p&&p.at&&Number.isFinite(Number(p.equity)));
+  const rows=(points||[]).filter(p=>p&&Number.isFinite(Date.parse(p.at))&&Number.isFinite(Number(p.equity)))
+    .slice().sort((a,b)=>Date.parse(a.at)-Date.parse(b.at));
   if(!rows.length){box.append(el("p","暂无可核对的账户净值快照。","muted"));return box;}
   const ns="http://www.w3.org/2000/svg";
   const s=(tag,attrs={})=>{const n=document.createElementNS(ns,tag);Object.entries(attrs).forEach(([k,v])=>n.setAttribute(k,String(v)));return n;};
-  const svg=s("svg",{viewBox:"0 0 720 210",role:"img","aria-label":"Paper 账户净值快照，实验版本之间断线"});
-  const values=rows.map(p=>Number(p.equity)), lo=Math.min(...values),hi=Math.max(...values),pad=Math.max((hi-lo)*0.2,hi*0.002,1);
-  const y=v=>170-(Number(v)-(lo-pad))/(hi-lo+2*pad)*135;
-  const x=i=>rows.length===1?360:65+i*610/(rows.length-1);
-  for(let i=0;i<3;i++){const yy=35+i*67.5;svg.append(s("line",{x1:65,y1:yy,x2:680,y2:yy,class:"gridline"}));const label=s("text",{x:3,y:yy+4,class:"axis"});label.textContent=money(hi+pad-i*(hi-lo+2*pad)/2);svg.append(label);}
-  let segment=[];
-  const flush=()=>{if(segment.length>1)svg.append(s("polyline",{points:segment.map(i=>x(i)+","+y(rows[i].equity)).join(" "),class:"trend"}));segment=[];};
-  rows.forEach((p,i)=>{if(segment.length&&rows[segment[0]].experiment_id!==p.experiment_id)flush();segment.push(i);});
+  const left=88,right=20,top=22,bottom=48,width=800,height=250,plotWidth=width-left-right,plotHeight=height-top-bottom;
+  const times=rows.map(p=>Date.parse(p.at)),firstTime=times[0],lastTime=times[times.length-1];
+  const values=rows.map(p=>Number(p.equity)),low=Math.min(...values),high=Math.max(...values),pad=Math.max((high-low)*0.2,Math.abs(high)*0.003,1);
+  const min=low-pad,max=high+pad;
+  const xAt=t=>lastTime===firstTime?left+plotWidth/2:left+(t-firstTime)/(lastTime-firstTime)*plotWidth;
+  const x=i=>xAt(times[i]),y=value=>top+(max-Number(value))/(max-min)*plotHeight;
+  const svg=s("svg",{viewBox:`0 0 ${width} ${height}`,role:"img","aria-label":"Paper 账户净值已观察快照；只连接实验版本明确相同的点"});
+  const title=s("title");title.textContent="Paper 账户净值 · "+rows.length+" 个已观察快照";svg.append(title);
+  const tickMoney=value=>new Intl.NumberFormat("zh-CN",{style:"currency",currency:"USD",maximumFractionDigits:0}).format(value);
+  for(let i=0;i<4;i++){
+    const fraction=i/3,yy=top+fraction*plotHeight,value=max-fraction*(max-min);
+    svg.append(s("line",{x1:left,y1:yy,x2:width-right,y2:yy,class:"gridline"}));
+    const label=s("text",{x:left-12,y:yy+4,class:"axis y-axis", "text-anchor":"end"});label.textContent=tickMoney(value);svg.append(label);
+  }
+  const formatDate=value=>new Date(value).toLocaleDateString("zh-CN",{month:"2-digit",day:"2-digit"});
+  const dateTicks=lastTime===firstTime?[firstTime]:[firstTime,(firstTime+lastTime)/2,lastTime];
+  dateTicks.forEach((value,index)=>{
+    const position=xAt(value),label=s("text",{x:position,y:height-13,class:"axis x-axis","text-anchor":index===0?"start":index===dateTicks.length-1?"end":"middle"});
+    label.textContent=formatDate(value);svg.append(s("line",{x1:position,y1:top+plotHeight,x2:position,y2:top+plotHeight+4,class:"axis-tick"}));svg.append(label);
+  });
+  const experimentId=p=>typeof p.experiment_id==="string"&&p.experiment_id.trim()?p.experiment_id.trim():null;
+  let segment=[],segmentExperiment=null;
+  const flush=()=>{if(segment.length>1)svg.append(s("polyline",{points:segment.map(i=>x(i)+","+y(rows[i].equity)).join(" "),class:"trend"}));segment=[];segmentExperiment=null;};
+  rows.forEach((p,i)=>{
+    const id=experimentId(p);
+    if(!id){flush();return;}
+    if(segment.length&&segmentExperiment!==id)flush();
+    if(!segment.length)segmentExperiment=id;
+    segment.push(i);
+  });
   flush();
-  rows.forEach((p,i)=>{const dot=s("circle",{cx:x(i),cy:y(p.equity),r:5,class:"dot"}),title=s("title");title.textContent=time(p.at)+" · "+money(p.equity)+" · "+(p.experiment_id||"版本未知");dot.append(title);svg.append(dot);});
-  box.append(svg,el("p",rows.length+" 个真实快照点。实验版本变更处断线；仅为采样时点，不是完整盘中走势。","muted"));
+  if(options.history){
+    (options.snapshots||[]).filter(p=>p&&Number.isFinite(Date.parse(p.at))&&Number.isFinite(Number(p.equity))).forEach(p=>{
+      const at=Date.parse(p.at);if(at<firstTime||at>lastTime)return;
+      const dot=s("circle",{cx:xAt(at),cy:y(p.equity),r:4.5,class:"dot decision-mark"}),tip=s("title");
+      tip.textContent="轮次快照 · "+time(p.at)+" · "+money(p.equity)+" · "+(experimentId(p)||"实验版本未记录");dot.append(tip);svg.append(dot);
+    });
+    const last=rows[rows.length-1],dot=s("circle",{cx:x(rows.length-1),cy:y(last.equity),r:6.5,class:"dot latest"}),tip=s("title");
+    tip.textContent="最近券商历史点 · "+time(last.at)+" · "+money(last.equity);dot.append(tip);svg.append(dot);
+  }else{
+    rows.forEach((p,i)=>{
+      const isLatest=i===rows.length-1,dot=s("circle",{cx:x(i),cy:y(p.equity),r:isLatest?7:5.5,class:"dot"+(isLatest?" latest":"")});
+      const tip=s("title");tip.textContent=time(p.at)+" · "+money(p.equity)+" · "+(experimentId(p)||"实验版本未记录");dot.append(tip);svg.append(dot);
+    });
+  }
+  const legend=el("div",null,"chart-legend");legend.append(el("span",null,"chart-legend-line"),el("span",options.history?"同一已知实验版本内连线；圆点标出轮次快照。":"同一已知实验版本内连线；版本不同或未记录时断开。","muted"));
+  const note=options.history
+    ? rows.length+" 个 Alpaca Paper 历史采样点（15 分钟粒度）。只展示同一账户净值；实验切换处断线，不归因为单一版本收益。"
+    : rows.length+" 个轮次账户快照。券商历史曲线暂不可用；当前仅展示已观察采样点，不代表完整盘中走势。";
+  box.append(svg,legend,el("p",note,"muted"));
   return box;
 }
 function chartView(team) {
-  const name=teamName(team),box=chart(team.equity_history);box.classList.add("team-chart",name.toLowerCase());
+  const name=teamName(team),history=team.portfolio_history,hasHistory=history?.status==="available"&&(history.points||[]).length>1;
+  const box=chart(hasHistory?history.points:team.equity_history,{history:hasHistory,snapshots:team.equity_history});box.classList.add("team-chart",name.toLowerCase());
   const head=el("div",null,"chart-team-head");head.append(el("strong",name),el("span",team.status==="available"?"档案可读":"等待发布","pill"));
   box.prepend(head,el("p","最近发布 "+time(team.published_at)+" · "+(team.rounds?.length||0)+" 轮档案","muted"));
   return box;

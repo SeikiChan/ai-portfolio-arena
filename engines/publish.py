@@ -15,14 +15,21 @@ import argparse
 import hashlib
 import math
 import os
+import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from ai_portfolios.common import ROOT, read, stamp, write
+import requests
+
+from ai_portfolios.common import ROOT, parse_time, read, stamp, write
+from ai_portfolios.credentials import paper_credentials
+from ai_portfolios.paper_accounts import BASE
 
 from . import contract
 
 SCHEMA_VERSION = 1
 TEAM_IDS = {"claude_engine": "claude-independent", "codex_engine": "gpt-independent"}
+ENGINE_PROVIDER = {"claude_engine": "claude", "codex_engine": "gpt"}
 DEFAULT_EXPORTS = {
     "claude_engine": ROOT / "exports" / "dashboard.json",
     "codex_engine": Path(os.environ.get("AI_ARENA_CODEX_EXPORT") or
@@ -76,6 +83,94 @@ def account_mark(directory, provider, job):
             "at": job.get("account_snapshot_id"), "equity": equity,
             "classification": "observed: Alpaca Paper account snapshot",
             "source_file": f"account_snapshot/{provider}_account.json"}
+
+
+def _utc_datetime(value):
+    """Parse Alpaca epoch/ISO timestamps and this repository's compact snapshot IDs."""
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        epoch = float(value)
+        if abs(epoch) >= 1_000_000_000_000:  # Alpaca may expose milliseconds in some clients.
+            epoch /= 1000
+        return datetime.fromtimestamp(epoch, timezone.utc)
+    if not isinstance(value, str):
+        raise ValueError("timestamp is not a string or epoch")
+    if re.fullmatch(r"\d{8}T\d{6}(?:\d+)?Z", value):
+        date, clock = value[:8], value[9:-1]
+        whole, _, fraction = clock.partition(".")
+        if not fraction and len(whole) > 6:
+            whole, fraction = whole[:6], whole[6:]
+        if fraction:
+            fraction = (fraction[:6]).ljust(6, "0")
+            return datetime.strptime(date + whole + fraction, "%Y%m%d%H%M%S%f").replace(tzinfo=timezone.utc)
+        return datetime.strptime(date + whole, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+    return parse_time(value).astimezone(timezone.utc)
+
+
+def portfolio_history(engine_id, marks, getter=None):
+    """Fetch one team's bounded, sanitized Paper equity series for the read-only dashboard."""
+    provider = ENGINE_PROVIDER.get(engine_id)
+    if provider is None:
+        raise ValueError("No Paper provider is registered for this engine")
+    anchors = []
+    for mark in marks:
+        try:
+            experiment_id = mark.get("experiment_id")
+            if not isinstance(experiment_id, str) or not experiment_id.strip():
+                experiment_id = None
+            anchors.append((_utc_datetime(mark["at"]), experiment_id))
+        except (KeyError, TypeError, ValueError, OverflowError, OSError):
+            continue
+    if not anchors:
+        return {"status": "unavailable", "reason": "没有可核对的账户快照时间", "timeframe": "15Min", "points": []}
+    anchors.sort(key=lambda row: row[0])
+    now_utc = datetime.now(timezone.utc)
+    start = max(anchors[0][0], now_utc - timedelta(days=29))
+    params = {"start": start.isoformat().replace("+00:00", "Z"),
+              "end": now_utc.isoformat().replace("+00:00", "Z"),
+              "timeframe": "15Min", "intraday_reporting": "market_hours", "pnl_reset": "no_reset"}
+    try:
+        key, secret = paper_credentials(only=provider)[provider]
+        response = (getter or requests.get)(BASE + "/v2/account/portfolio/history",
+                                            headers={"APCA-API-KEY-ID": key,
+                                                     "APCA-API-SECRET-KEY": secret},
+                                            params=params, timeout=10, allow_redirects=False)
+        if response.status_code != 200:
+            return {"status": "unavailable", "reason": f"Alpaca Paper HTTP {response.status_code}",
+                    "timeframe": "15Min", "points": []}
+        payload = response.json()
+    except (requests.RequestException, OSError, ValueError, KeyError, TypeError) as exc:
+        return {"status": "unavailable", "reason": type(exc).__name__, "timeframe": "15Min", "points": []}
+
+    if not isinstance(payload, dict):
+        return {"status": "unavailable", "reason": "Alpaca 返回的时间序列格式无效",
+                "timeframe": "15Min", "points": []}
+    timestamps, equities = payload.get("timestamp"), payload.get("equity")
+    if not isinstance(timestamps, list) or not isinstance(equities, list) or len(timestamps) != len(equities):
+        return {"status": "unavailable", "reason": "Alpaca 返回的时间序列格式无效",
+                "timeframe": "15Min", "points": []}
+    parsed_points, invalid_rows = [], 0
+    for raw_at, raw_equity in zip(timestamps, equities):
+        try:
+            at = _utc_datetime(raw_at)
+            equity = float(raw_equity)
+            if not math.isfinite(equity) or equity < 0:
+                raise ValueError("equity is invalid")
+        except (TypeError, ValueError, OverflowError, OSError):
+            invalid_rows += 1
+            continue
+        if at < start or at > now_utc:
+            continue
+        parsed_points.append((at, equity))
+    parsed_points.sort(key=lambda row: row[0])
+    points, anchor_index = [], 0
+    for at, equity in parsed_points:
+        while anchor_index + 1 < len(anchors) and anchors[anchor_index + 1][0] <= at:
+            anchor_index += 1
+        points.append({"at": at.isoformat().replace("+00:00", "Z"), "equity": equity,
+                       "experiment_id": anchors[anchor_index][1],
+                       "classification": "observed: Alpaca Paper portfolio history"})
+    return {"status": "available" if points else "empty", "source": "GET Alpaca Paper /v2/account/portfolio/history",
+            "timeframe": "15Min", "observed_at": stamp(), "invalid_rows": invalid_rows, "points": points}
 
 
 def research_trace(directory, provider):
@@ -182,7 +277,7 @@ def round_entries(directory):
     return [provider_entry(directory, provider, summary, job) for provider in summary["providers"]]
 
 
-def build(engine_id="claude_engine", team_id=None, limit=20):
+def build(engine_id="claude_engine", team_id=None, limit=20, fetch_portfolio_history=False):
     team_id = team_id or TEAM_IDS.get(engine_id)
     if not team_id:
         raise ValueError("No publication team id is registered for this engine")
@@ -196,10 +291,13 @@ def build(engine_id="claude_engine", team_id=None, limit=20):
             # invalid round must not look the same to whoever reads the dashboard.
             rejected.append({"round_id": directory.name, "reason": str(exc)[:200]})
     history = sorted((row["equity_mark"] for row in rounds if row.get("equity_mark")), key=lambda row: row["at"] or "")
+    broker_history = portfolio_history(engine_id, history) if fetch_portfolio_history else {
+        "status": "not_requested", "timeframe": "15Min", "points": []}
     return {"schema_version": SCHEMA_VERSION, "team_id": team_id, "engine_id": engine_id,
             "branch": branch_name(), "workspace": str(ROOT), "execution_mode": "alpaca_paper_auto",
             "status": "available" if rounds else ("initialized_no_runs" if not rejected else "unavailable"),
-            "published_at": stamp(), "rounds": rounds, "equity_history": history, "rejected_rounds": rejected,
+            "published_at": stamp(), "rounds": rounds, "equity_history": history,
+            "portfolio_history": broker_history, "rejected_rounds": rejected,
             "orders_submitted": any(round_.get("orders_submitted") for round_ in rounds),
             "note": "独立引擎各自连接自己的 Alpaca Paper 账户；页面只读共享发布文件。Paper 委托与成交不代表真实资金结果，收益未经验证。",
             "classification": {"model_decisions": "assumption", "audit_hashes": "observed",
@@ -213,7 +311,7 @@ def main():
     parser.add_argument("--limit", type=int, default=20, help="Rounds to publish; prompts make the file large")
     parser.add_argument("--out")
     arguments = parser.parse_args()
-    export = build(arguments.engine, arguments.team_id, arguments.limit)
+    export = build(arguments.engine, arguments.team_id, arguments.limit, fetch_portfolio_history=True)
     output = Path(arguments.out) if arguments.out else DEFAULT_EXPORTS[arguments.engine]
     write(output, export)
     print(f"{export['status']}: {len(export['rounds'])} rounds, {len(export['rejected_rounds'])} rejected "

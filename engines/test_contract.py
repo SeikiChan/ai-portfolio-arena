@@ -168,6 +168,55 @@ def test_published_equity_marks_are_observed_and_versioned(tmp_path, monkeypatch
     assert "SECRET" not in __import__("json").dumps(export)
 
 
+def test_portfolio_history_is_read_only_sanitized_and_split_by_known_experiment(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    first, second = now - timedelta(days=3), now - timedelta(days=1)
+    marks = [{"at": first.isoformat(), "experiment_id": "exp-a"},
+             {"at": second.isoformat(), "experiment_id": "exp-b"}]
+    requested = {}
+
+    class Response:
+        status_code = 200
+        def json(self):
+            return {"timestamp": [int((second + timedelta(hours=2)).timestamp()),
+                                  int((first + timedelta(hours=1)).timestamp()),
+                                  int((second + timedelta(hours=1)).timestamp())],
+                    "equity": ["10012.50", "10000.00", "bad-value"]}
+
+    def getter(url, **kwargs):
+        requested["url"] = url
+        requested.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr(publish, "paper_credentials", lambda *, only: {only: ("PAPER_KEY", "PAPER_SECRET")})
+    history = publish.portfolio_history("codex_engine", marks, getter=getter)
+
+    assert requested["url"] == "https://paper-api.alpaca.markets/v2/account/portfolio/history"
+    assert requested["headers"] == {"APCA-API-KEY-ID": "PAPER_KEY", "APCA-API-SECRET-KEY": "PAPER_SECRET"}
+    assert requested["params"]["timeframe"] == "15Min"
+    assert history["status"] == "available" and history["invalid_rows"] == 1
+    assert [point["experiment_id"] for point in history["points"]] == ["exp-a", "exp-b"]
+    assert [point["equity"] for point in history["points"]] == [10000.0, 10012.5]
+    serialized = __import__("json").dumps(history)
+    assert "PAPER_KEY" not in serialized and "PAPER_SECRET" not in serialized
+
+
+def test_compact_snapshot_timestamp_parser_keeps_fractional_seconds():
+    from datetime import datetime, timezone
+    parsed = publish._utc_datetime("20261015T133518291686Z")
+    assert parsed == datetime(2026, 10, 15, 13, 35, 18, 291686, tzinfo=timezone.utc)
+
+
+def test_unavailable_broker_history_does_not_fabricate_a_series(monkeypatch):
+    monkeypatch.setattr(publish, "paper_credentials", lambda *, only: {only: ("PAPER_KEY", "PAPER_SECRET")})
+    def timeout(*args, **kwargs):
+        raise publish.requests.Timeout()
+    result = publish.portfolio_history("claude_engine", [{"at": "20261010T000000Z", "experiment_id": "exp"}], getter=timeout)
+    assert result["status"] == "unavailable" and result["reason"] == "Timeout"
+    assert result["points"] == []
+
+
 def test_research_trace_excludes_model_input_and_bounds_tool_excerpt(tmp_path):
     directory = tmp_path / "round"
     directory.mkdir()
