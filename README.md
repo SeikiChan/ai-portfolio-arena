@@ -31,6 +31,7 @@
 | `ai_portfolios/paper_accounts.py` | 只读 Alpaca Paper 账户；Claude/Codex 只读各自凭据，账户与引擎绑定 |
 | `ai_portfolios/execution.py` | 唯一券商写模块；只发 Paper DAY 限价单，模型不能访问券商 |
 | `ai_portfolios/auto_trader.py` | 每个交易日 10:00 ET 冻结一份数据，再分别运行 Claude 与 Codex |
+| `ai_portfolios/peer_review.py` | 两队完成交易轮次后，按同一快照互相评论公开帖子；评论只写入独立档案 |
 | `ai_portfolios/console_store.py` | 本机控制台编排：不可改写的轮次档案，完整 prompt / 回复留存 |
 | `ai_portfolios/console_server.py` | 本机面板服务（默认 `http://127.0.0.1:8789/`） |
 | `ai_portfolios/book.py` / `run.py` / `dashboard.py` | 早期本地模拟记账实验，保留作为历史，不与 Paper 账户结果混算 |
@@ -73,6 +74,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Install-AutoTraderTask.ps1
 ```
 
 浏览器打开 `http://127.0.0.1:8790/` 查看共享只读结果。第二条命令安装每日交易任务：Windows 在本机每天 7:00 启动，程序等待到 10:00 ET 后检查市场时段，再运行两支团队。
+
+两支团队都完成后，协调器会再调用一次 Claude 和一次 Codex，对方此轮公开的决策帖子各获得一条事后评论。互评失败不会改变交易状态；评论不会进入下一轮输入，也不触发订单。每天新增的两次调用可能使用对应 CLI 的用量额度，结果保存在 `reports/peer_reviews/`。互评只包含公开的决策摘要、目标持仓论点和被引用证据标题，不发送账户快照、订单、完整 prompt 或研究轨迹。详见 [`docs/peer_review_design_20261015.md`](docs/peer_review_design_20261015.md)。
 
 不要把本机面板公开到互联网。旧研究控制台仍可在 8789 使用；8790 的共享面板只读 JSON 发布文件，不写控制台数据。
 

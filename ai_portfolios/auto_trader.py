@@ -95,6 +95,12 @@ def run_daily(trading_date=None):
         state["updated_at"] = stamp()
         write(state_file, state)
 
+    # Post-round discussion is an isolated sidecar. It sees only the two sanitized published posts,
+    # runs after each engine has finished its execution attempt, and cannot change either trade result.
+    from .peer_review import run_after_trading
+    state["peer_review"] = run_after_trading(state["engines"], pointer["packet_sha256"],
+                                             config=read(APP / "config.json"))
+
     successes = sum(row.get("status") == "completed" and row.get("execution_status") not in
                     {"failed", "submission_unknown", "partial_failure"}
                     for row in state["engines"].values())

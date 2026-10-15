@@ -50,3 +50,17 @@
 .comparison-legend-item b{font-weight:600}
 .comparison-note{margin:12px 0 0}
 @media(max-width:700px){.comparison-panel{padding:14px 10px}.comparison-summary{gap:8px}.comparison-stat{padding:11px 10px}.comparison-stat-head strong{font-size:17px}.comparison-source{font-size:10px;padding:3px 6px}.comparison-value{font-size:21px}.comparison-change,.comparison-detail{font-size:10px}.comparison-axis{font-size:14px}.comparison-legend{gap:10px}.comparison-legend-item,.comparison-note{font-size:10px}}
+.feed-replies{margin:19px 0 7px 1px;padding:2px 0 0 22px;border-left:1px solid #d9e1d6}
+.feed-replies-heading{margin:4px 0 11px;color:#53705a;font-size:13px;font-weight:600}
+.feed-reply{position:relative;margin:10px 0 0;padding:12px 14px;background:#f6f8f4;border:1px solid #e4eae1;border-radius:8px}
+.feed-reply:before{content:"";position:absolute;width:15px;left:-23px;top:19px;border-top:1px solid #d9e1d6}
+.feed-reply-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.feed-reply-head .team-avatar{width:22px;height:22px;font-size:11px}
+.feed-reply-head strong{font:15px Georgia,serif;color:#344a39}
+.feed-reply.codex .team-avatar{background:#e6f1ee;color:#31756c}
+.reply-stance{padding:3px 7px;background:#e9efe7;border-radius:12px;color:#657467;font-size:10px}
+.feed-reply-head .feed-time{margin-left:auto;font-size:11px}
+.feed-reply-body{font-size:13px;line-height:1.75;margin:8px 0 3px;max-width:980px;white-space:pre-wrap}
+.feed-reply-focus,.feed-replies-note{color:#79867a;font-size:10px;margin:6px 0 0}
+.feed-replies-note{margin-top:9px}
+@media(max-width:700px){.feed-replies{padding-left:16px}.feed-reply{padding:10px}.feed-reply:before{width:10px;left:-17px}.feed-reply-head .feed-time{margin-left:0}}
