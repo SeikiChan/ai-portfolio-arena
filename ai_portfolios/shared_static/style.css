@@ -11,3 +11,42 @@
 .chart-legend-line{width:20px;height:0;border-top:3px solid var(--accent);border-radius:4px;flex:none}
 .chart.team-chart.codex .chart-legend-line{border-color:#31756c}
 .feed-evidence{font:10px/1.5 Consolas,monospace;color:#718173;overflow-wrap:anywhere;margin:6px 0}
+#charts{display:block}
+.comparison-panel{background:#fffefa;border:1px solid #dce4da;border-radius:12px;padding:22px 24px;box-shadow:0 8px 24px #1d33220a;min-width:0}
+.comparison-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.comparison-stat{--series-color:#477c5d;background:#f4f7f2;border:1px solid #e0e8dd;border-top:3px solid var(--series-color);border-radius:8px;padding:15px 17px;min-width:0}
+.comparison-stat.codex{--series-color:#397e9a}
+.comparison-stat-head{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.comparison-stat-head strong{font:20px Georgia,serif;color:#27392c}
+.comparison-source{font-size:11px;color:#718173;background:#eaf0e8;border-radius:20px;padding:4px 8px;white-space:nowrap}
+.comparison-value{font:clamp(23px,3vw,32px) Consolas,monospace;letter-spacing:-1px;color:#27392c;margin:12px 0 3px}
+.comparison-change,.comparison-detail{font-size:12px;color:#667669;margin:4px 0;line-height:1.6}
+.comparison-change{font-weight:600;color:#395a45}
+.comparison-panel>svg{width:100%;height:auto;display:block;margin:8px 0 0;overflow:visible}
+.comparison-gridline{stroke:#e0e7df;stroke-width:1}
+.comparison-axis{fill:#78877c;font:12px Consolas,monospace}
+.comparison-tick{stroke:#a2b0a4;stroke-width:1}
+.equity-line{fill:none;stroke-width:3;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}
+.equity-line.claude{stroke:#477c5d}
+.equity-line.codex{stroke:#397e9a}
+.equity-sample{fill:#fffefa;stroke-width:2.5;vector-effect:non-scaling-stroke}
+.equity-sample.claude{stroke:#477c5d}
+.equity-sample.codex{stroke:#397e9a}
+.equity-round{fill:#fffefa;stroke-width:2.5;vector-effect:non-scaling-stroke}
+.equity-round.claude{stroke:#477c5d}
+.equity-round.codex{stroke:#397e9a}
+.equity-latest{stroke:#fffefa;stroke-width:2.5;vector-effect:non-scaling-stroke}
+.equity-latest.claude{fill:#477c5d}
+.equity-latest.codex{fill:#397e9a}
+.equity-end-label line{stroke-width:1.5;vector-effect:non-scaling-stroke}
+.equity-end-label rect{stroke:#fffefa;stroke-width:1}
+.equity-end-label text{font:600 12px "Segoe UI","Microsoft YaHei UI",sans-serif;fill:#fffefa}
+.equity-end-label.claude line,.equity-end-label.claude rect{stroke:#477c5d}.equity-end-label.claude rect{fill:#477c5d}
+.equity-end-label.codex line,.equity-end-label.codex rect{stroke:#397e9a}.equity-end-label.codex rect{fill:#397e9a}
+.comparison-legend{display:flex;align-items:center;gap:17px;flex-wrap:wrap;border-top:1px solid #e8ede6;padding-top:13px;margin-top:2px}
+.comparison-legend-item{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:#526255}
+.comparison-legend-item i{display:block;width:22px;border-top:3px solid #477c5d;border-radius:4px}
+.comparison-legend-item.codex i{border-color:#397e9a}
+.comparison-legend-item b{font-weight:600}
+.comparison-note{margin:12px 0 0}
+@media(max-width:700px){.comparison-panel{padding:14px 10px}.comparison-summary{gap:8px}.comparison-stat{padding:11px 10px}.comparison-stat-head strong{font-size:17px}.comparison-source{font-size:10px;padding:3px 6px}.comparison-value{font-size:21px}.comparison-change,.comparison-detail{font-size:10px}.comparison-axis{font-size:14px}.comparison-legend{gap:10px}.comparison-legend-item,.comparison-note{font-size:10px}}
