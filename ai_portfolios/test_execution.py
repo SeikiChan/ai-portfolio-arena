@@ -46,6 +46,28 @@ def test_an_exit_sells_the_exact_fractional_position():
     assert proposal["orders"][0]["qty"] == 2.345678912
 
 
+def test_exposure_records_what_the_orders_can_actually_reach():
+    """The number that made whole-share truncation visible: 84% intended against 61.7% reachable,
+    with nothing anywhere recording the gap. A skipped leg still opens one, so it stays measured."""
+    quotes = {"MSFT": quote(), "AAPL": quote(at=TIME - timedelta(seconds=600))}
+    closes = {"MSFT": 100.0, "AAPL": 100.0}
+    proposal = execution.plan(decision(positions=(("MSFT", 0.15), ("AAPL", 0.15))), account(), [],
+                              quotes, closes, CONFIG, TIME)
+    gap = proposal["exposure"]
+    # AAPL is skipped on a stale quote, so half the intended book is unreachable this round.
+    assert gap["intended_invested"] == pytest.approx(0.30)
+    assert gap["reachable_invested"] == pytest.approx(0.15, abs=0.005)
+    assert gap["shortfall"] == pytest.approx(0.15, abs=0.005)
+
+
+def test_exposure_closes_to_nothing_when_every_leg_prices(dummy=None):
+    quotes = {"MSFT": quote(), "AAPL": quote(), "NVDA": quote()}
+    closes = {"MSFT": 100.0, "AAPL": 100.0, "NVDA": 100.0}
+    proposal = execution.plan(decision(positions=(("MSFT", 0.1), ("AAPL", 0.1), ("NVDA", 0.1))),
+                              account(), [], quotes, closes, CONFIG, TIME)
+    assert proposal["exposure"]["shortfall"] == pytest.approx(0.0, abs=0.005)
+
+
 def test_limit_price_sits_past_the_touch_on_each_side():
     metrics = execution.quote_metrics("MSFT", quote(bid=100.0, ask=101.0), 100.0, TIME)
     assert execution.limit_for("buy", metrics) > metrics["ask"]
