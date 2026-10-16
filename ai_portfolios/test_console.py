@@ -8,6 +8,7 @@ import requests
 from ai_portfolios.common import write
 from ai_portfolios.console_server import create_server
 from ai_portfolios.console_store import ConsoleStore
+from ai_portfolios import paper_accounts
 from ai_portfolios.paper_accounts import BASE, load_credentials, model_portfolio, public_account, read_one, verify_bindings
 
 
@@ -70,6 +71,90 @@ def test_failed_holdings_is_unknown_not_empty(tmp_path):
     result=read_one('claude',('key','secret'),tmp_path,lambda *a,**k:Response())
     assert result['status']=='unavailable'
     assert public_account(result)['positions'] is None
+
+
+def flaky(fail_times, status=500, body=None, kind='/account'):
+    """A getter where one endpoint fails `fail_times` times before answering."""
+    state = {'failures': 0, 'calls': []}
+
+    class Response:
+        def __init__(self, code, value=None):
+            self.status_code, self.value = code, value
+
+        def json(self):
+            if self.value is None:
+                raise ValueError('Expecting value')
+            return self.value
+
+    def get(url, **kwargs):
+        state['calls'].append(url)
+        if url.endswith(kind) and state['failures'] < fail_times:
+            state['failures'] += 1
+            return Response(status, body)
+        return Response(200, account()['account'] if url.endswith('/account') else [])
+
+    return get, state
+
+
+def test_a_transient_account_failure_no_longer_costs_the_whole_snapshot(tmp_path, monkeypatch):
+    """2026-10-16, measured: /v2/positions and /v2/orders answered, /v2/account did not.
+
+    The snapshot went to "unavailable" and execute() refused a decision that had already passed
+    validation, so neither account traded that day. Every endpoint was healthy again within hours -
+    0.24s on all six when checked - which is what a blip looks like after it has passed.
+    """
+    monkeypatch.setattr(paper_accounts.wait, 'sleep', lambda seconds: None)
+    get, state = flaky(fail_times=2, status=500)
+    result = read_one('claude', ('key', 'secret'), tmp_path, get)
+    assert result['status'] == 'connected'
+    assert result['recovered_reads'] == [{'source': 'account', 'attempts': 3}]
+
+
+def test_a_recovered_read_is_not_recorded_as_an_error(tmp_path, monkeypatch):
+    """The trap in this fix. execute() requires status == "connected", and read_one downgrades to
+    "partial" the moment errors is non-empty - so logging a recovered retry there would convert
+    every blip this retry exists to absorb into the refusal it exists to prevent."""
+    monkeypatch.setattr(paper_accounts.wait, 'sleep', lambda seconds: None)
+    get, _ = flaky(fail_times=1, status=503)
+    result = read_one('claude', ('key', 'secret'), tmp_path, get)
+    assert result['errors'] == [] and result['status'] == 'connected'
+
+
+def test_a_truncated_body_is_retried_like_a_server_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(paper_accounts.wait, 'sleep', lambda seconds: None)
+    get, _ = flaky(fail_times=1, status=200, body=None)   # body None -> .json() raises
+    result = read_one('claude', ('key', 'secret'), tmp_path, get)
+    assert result['status'] == 'connected'
+
+
+def test_bad_credentials_are_answered_once_not_hammered(tmp_path, monkeypatch):
+    """401 is not transient. Repeating it three times buys nothing and spends a rate limit."""
+    monkeypatch.setattr(paper_accounts.wait, 'sleep', lambda seconds: pytest.fail('must not back off'))
+    get, state = flaky(fail_times=99, status=401)
+    result = read_one('claude', ('key', 'secret'), tmp_path, get)
+    assert result['status'] == 'unavailable'
+    assert sum(1 for url in state['calls'] if url.endswith('/account')) == 1
+    assert result['errors'][0] == {'source': 'account', 'error': 'Alpaca Paper HTTP 401', 'attempts': 1}
+
+
+def test_a_persistent_failure_still_refuses_after_its_attempts(tmp_path, monkeypatch):
+    monkeypatch.setattr(paper_accounts.wait, 'sleep', lambda seconds: None)
+    get, state = flaky(fail_times=99, status=503)
+    result = read_one('claude', ('key', 'secret'), tmp_path, get)
+    assert result['status'] == 'unavailable'
+    assert sum(1 for url in state['calls'] if url.endswith('/account')) == paper_accounts.READ_ATTEMPTS
+    assert result['errors'][0]['error'] == 'Alpaca Paper HTTP 503'
+
+
+def test_a_retry_cannot_collide_with_the_exclusive_write_of_a_good_read(tmp_path, monkeypatch):
+    """Retrying read_one as a whole would hit FileExistsError on the endpoint that already
+    succeeded, so the retry has to sit inside one endpoint, before anything is written."""
+    monkeypatch.setattr(paper_accounts.wait, 'sleep', lambda seconds: None)
+    get, _ = flaky(fail_times=2, status=500, kind='/orders')
+    result = read_one('claude', ('key', 'secret'), tmp_path, get)
+    assert result['status'] == 'connected'
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        'claude_account.json', 'claude_orders.json', 'claude_positions.json']
 
 
 def test_public_view_masks_account_identity():

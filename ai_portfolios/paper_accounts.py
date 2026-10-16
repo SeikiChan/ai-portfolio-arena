@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import time as wait
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -17,6 +18,45 @@ ENDPOINTS = {
     "positions": ("/v2/positions", {}),
     "orders": ("/v2/orders", {"status": "all", "limit": 100, "direction": "desc", "nested": "true"}),
 }
+# A snapshot needs all three endpoints, and one transient failure on one of them used to cost a
+# whole trading day: on 2026-10-16 positions and orders came back, /v2/account did not, so the
+# pre-execution snapshot read "unavailable" and a decision that had passed validation was refused.
+# Retry only where retrying can help. Bad credentials are not transient, so a 401/403 is returned
+# on the first answer rather than repeated three times against a rate limit.
+READ_ATTEMPTS = 3
+READ_BACKOFF_SECONDS = 0.75
+RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
+SHAPE = {"account": lambda payload: isinstance(payload, dict) and bool(payload.get("id"))}
+
+
+def fetch_endpoint(getter, url, params, headers, check, attempts=READ_ATTEMPTS, sleep=None):
+    """One endpoint as (payload, problem, attempts_used). Exactly one of payload/problem is set.
+
+    A truncated body raises inside .json() and is retried for the same reason a 503 is: the next
+    answer may be whole. Nothing here is written to disk, so a retry cannot collide with the
+    exclusive writes that record a successful read.
+    """
+    sleep = sleep or wait.sleep
+    problem = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            response = getter(url, headers=headers, params=params, timeout=20, allow_redirects=False)
+            if response.status_code != 200:
+                problem = f"Alpaca Paper HTTP {response.status_code}"
+                if response.status_code not in RETRYABLE_STATUS:
+                    return None, problem, attempt
+            else:
+                payload = response.json()
+                if not check(payload):
+                    raise ValueError("Unexpected response shape")
+                return payload, None, attempt
+        except requests.RequestException as exc:
+            problem = type(exc).__name__
+        except ValueError as exc:
+            problem = str(exc)[:60] or type(exc).__name__
+        if attempt < max(1, attempts):
+            sleep(READ_BACKOFF_SECONDS * attempt)
+    return None, problem, max(1, attempts)
 
 
 def load_credentials(path=None, only=None):
@@ -45,22 +85,25 @@ def read_one(name, credentials, directory, getter=None):
     getter = getter or requests.get
     key, secret = credentials
     result = {"provider": name, "environment": "alpaca_paper", "status": "connected", "fetched_at": stamp(), "errors": [], "records": []}
+    headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
+    recovered = []
     for kind, (path, params) in ENDPOINTS.items():
-        try:
-            response = getter(BASE + path, headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}, params=params, timeout=20, allow_redirects=False)
-            if response.status_code != 200:
-                result["errors"].append({"source": kind, "error": f"Alpaca Paper HTTP {response.status_code}"})
-                continue
-            payload = response.json()
-            if (kind == "account" and (not isinstance(payload, dict) or not payload.get("id"))) or (kind != "account" and not isinstance(payload, list)):
-                raise ValueError("Unexpected response shape")
-            file = directory / (name + "_" + kind + ".json")
-            write(file, payload, exclusive=True)
-            result[kind] = payload
-            result["records"].append({"file": file.name, "source": "GET " + BASE + path, "query": params,
-                                       "rows": len(payload) if isinstance(payload, list) else 1, "sha256": digest(file), "classification": "observed"})
-        except (requests.RequestException, ValueError) as exc:
-            result["errors"].append({"source": kind, "error": type(exc).__name__})
+        check = SHAPE.get(kind, lambda payload: isinstance(payload, list))
+        payload, problem, attempts = fetch_endpoint(getter, BASE + path, params, headers, check)
+        if problem is not None:
+            result["errors"].append({"source": kind, "error": problem, "attempts": attempts})
+            continue
+        if attempts > 1:
+            # Deliberately not in errors: any entry there downgrades status out of "connected",
+            # which would turn every blip this retry exists to absorb into a refusal instead.
+            recovered.append({"source": kind, "attempts": attempts})
+        file = directory / (name + "_" + kind + ".json")
+        write(file, payload, exclusive=True)
+        result[kind] = payload
+        result["records"].append({"file": file.name, "source": "GET " + BASE + path, "query": params,
+                                   "rows": len(payload) if isinstance(payload, list) else 1, "sha256": digest(file), "classification": "observed"})
+    if recovered:
+        result["recovered_reads"] = recovered
     if "account" not in result:
         result["status"] = "unavailable"
     elif result["errors"]:
