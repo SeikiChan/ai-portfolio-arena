@@ -112,35 +112,17 @@ function chartView(teams) {
   const box=el("section",null,"comparison-panel");
   const historyRows=points=>(points||[]).filter(p=>p&&Number.isFinite(Date.parse(p.at))&&Number.isFinite(Number(p.equity)))
     .map(p=>({...p,atMs:Date.parse(p.at),equity:Number(p.equity)})).sort((a,b)=>a.atMs-b.atMs);
-  const experimentId=p=>typeof p.experiment_id==="string"&&p.experiment_id.trim()?p.experiment_id.trim():null;
   const series=(teams||[]).map(team=>{
     const history=team.portfolio_history,points=history?.status==="available"?historyRows(history.points):[];
-    const intervalMatch=/^(\d+)Min$/.exec(history?.timeframe||"");
-    const intervalMs=intervalMatch?Number(intervalMatch[1])*60_000:15*60_000;
     return {team,name:teamName(team),key:teamName(team).toLowerCase(),hasHistory:points.length>1,
-      points,confirmedPoints:points.filter(experimentId),timeframe:history?.timeframe||"账户历史",intervalMs,maxGapMs:intervalMs*2};
+      points,timeframe:history?.timeframe||"账户历史"};
   });
-  const available=series.filter(item=>item.confirmedPoints.length>1);
+  const available=series.filter(item=>item.points.length>1);
   const summary=el("div",null,"comparison-summary");
-  const commonStart=available.length?Math.max(...available.map(item=>item.confirmedPoints[0].atMs)):null;
-  const commonEnd=available.length?Math.min(...available.map(item=>item.confirmedPoints[item.confirmedPoints.length-1].atMs)):null;
+  const commonStart=available.length?Math.max(...available.map(item=>item.points[0].atMs)):null;
+  const commonEnd=available.length?Math.min(...available.map(item=>item.points[item.points.length-1].atMs)):null;
   const hasWindow=commonStart!=null&&commonEnd!=null&&commonStart<=commonEnd;
   const visible=hasWindow?available.map(item=>({...item,visiblePoints:item.points.filter(p=>p.atMs>=commonStart&&p.atMs<=commonEnd)})):[];
-  for(const item of visible){
-    let segment=[],segmentExperiment=null;
-    const flush=()=>{if(segment.length>1)item.segments.push(segment);segment=[];segmentExperiment=null;};
-    item.segments=[];
-    for(const point of item.visiblePoints){
-      const id=experimentId(point);
-      if(!id){flush();continue;}
-      const previous=segment[segment.length-1];
-      if(previous&&(id!==segmentExperiment||point.atMs-previous.atMs>item.maxGapMs))flush();
-      if(!segment.length)segmentExperiment=id;
-      segment.push(point);
-    }
-    flush();
-    item.plottedPoints=item.segments.reduce((total,rows)=>total+rows.length,0);
-  }
   for(const item of series){
     const samples=hasWindow?item.points.filter(p=>p.atMs>=commonStart&&p.atMs<=commonEnd):[];
     const first=samples[0],last=samples[samples.length-1],card=el("article",null,"comparison-stat "+item.key);
@@ -156,21 +138,21 @@ function chartView(teams) {
   if(!visible.some(item=>item.visiblePoints.length)){
     box.append(el("p","两个账户目前没有足够的共同账户历史来绘制走势。轮次快照仍保留在各自记录中。","muted"));return box;
   }
-  if(!visible.some(item=>item.segments.length)){
-    box.append(el("p","当前共同时间窗内没有连续、可核对的账户历史区间。","muted"));return box;
-  }
-
   const ns="http://www.w3.org/2000/svg";
   const s=(tag,attrs={})=>{const n=document.createElementNS(ns,tag);Object.entries(attrs).forEach(([k,v])=>n.setAttribute(k,String(v)));return n;};
   const left=94,right=158,top=28,bottom=54,width=1040,height=370,plotRight=width-right,plotWidth=plotRight-left,plotHeight=height-top-bottom;
-  const values=visible.flatMap(item=>item.segments.flatMap(rows=>rows.map(p=>p.equity)));
+  const values=visible.flatMap(item=>item.visiblePoints.map(p=>p.equity));
   const low=Math.min(...values),high=Math.max(...values),pad=Math.max((high-low)*0.18,Math.abs(high)*0.0025,1),min=low-pad,max=high+pad;
   const sampleTimes=[...new Set(visible.flatMap(item=>item.visiblePoints.map(p=>p.atMs)))].sort((a,b)=>a-b);
-  const compressedTimes=new Map();let compressedTime=0;
-  const maxGapMs=Math.max(...visible.map(item=>item.maxGapMs)),compressedStepMs=Math.min(...visible.map(item=>item.intervalMs));
+  const intervalMs=visible.map(item=>{
+    const match=/^(\d+)Min$/.exec(item.timeframe);
+    return match?Number(match[1])*60_000:15*60_000;
+  });
+  const maxGapMs=Math.max(...intervalMs)*2,compressedStepMs=Math.min(...intervalMs);
+  const compressedTimes=new Map();let compressedElapsed=0;
   sampleTimes.forEach((value,index)=>{
-    if(index){const gap=value-sampleTimes[index-1];compressedTime+=gap>maxGapMs?compressedStepMs:gap;}
-    compressedTimes.set(value,compressedTime);
+    if(index){const gap=value-sampleTimes[index-1];compressedElapsed+=gap>maxGapMs?compressedStepMs:gap;}
+    compressedTimes.set(value,compressedElapsed);
   });
   const xStart=compressedTimes.get(commonStart),xEnd=compressedTimes.get(commonEnd);
   const xAt=t=>xEnd===xStart?left+plotWidth/2:left+(compressedTimes.get(t)-xStart)/(xEnd-xStart)*plotWidth;
@@ -193,9 +175,9 @@ function chartView(teams) {
     label.textContent=formatDate(value);svg.append(s("line",{x1:position,y1:top+plotHeight,x2:position,y2:top+plotHeight+5,class:"comparison-tick"}));svg.append(label);
   });
   for(const item of visible){
-    for(const rows of item.segments)svg.append(s("polyline",{points:rows.map(p=>xAt(p.atMs)+","+y(p.equity)).join(" "),class:"equity-line "+item.key}));
+    svg.append(s("polyline",{points:item.visiblePoints.map(p=>xAt(p.atMs)+","+y(p.equity)).join(" "),class:"equity-line "+item.key}));
   }
-  const endpointCandidates=visible.map(item=>{const rows=item.segments[item.segments.length-1],last=rows?.[rows.length-1];return last?{item,last}:null;}).filter(Boolean)
+  const endpointCandidates=visible.map(item=>{const last=item.visiblePoints[item.visiblePoints.length-1];return last?{item,last}:null;}).filter(Boolean)
     .sort((a,b)=>y(a.last.equity)-y(b.last.equity));
   if(endpointCandidates.length===2&&Math.abs(y(endpointCandidates[0].last.equity)-y(endpointCandidates[1].last.equity))<27){
     const center=(y(endpointCandidates[0].last.equity)+y(endpointCandidates[1].last.equity))/2;
@@ -210,9 +192,9 @@ function chartView(teams) {
   box.append(svg);
   const legend=el("div",null,"comparison-legend");
   for(const item of series){const entry=el("span",null,"comparison-legend-item "+item.key);entry.append(el("i"),el("b",item.name));legend.append(entry);}
-  legend.append(el("span","连续线段=可核对的账户历史","muted"));box.append(legend);
-  const sampling=visible.map(item=>item.name+" "+item.plottedPoints+" / "+item.visiblePoints.length+" 个可绘 / 历史采样点").join("；");
-  box.append(el("p","共同观察窗口 "+time(new Date(commonStart).toISOString())+" 至 "+time(new Date(commonEnd).toISOString())+"。"+sampling+"。只画有实验 ID 的账户历史；实验切换、ID 缺失或采样间隔超过 30 分钟时断线，不画轮次快照圆点。横轴压缩长采样间隔并标日期，断点不跨接；纵轴为两账户共用美元范围且不从零开始。净值变化不能单独归因于某一轮或某版策略。","comparison-note muted"));
+  legend.append(el("span","连续折线=相邻账户历史采样点；长采样空档压缩","muted"));box.append(legend);
+  const sampling=visible.map(item=>item.name+" "+item.visiblePoints.length+" 个历史采样点").join("；");
+  box.append(el("p","共同观察窗口 "+time(new Date(commonStart).toISOString())+" 至 "+time(new Date(commonEnd).toISOString())+"。"+sampling+"。横轴压缩超过 30 分钟的无采样间隔并保留日期顺序，折线连接相邻真实账户观测值，不代表采样间的连续行情。实验 ID 缺失或切换不切断账户曲线，但相关净值变化无法单独归因至某轮或某版策略。纵轴为两账户共用美元范围且不从零开始。","comparison-note muted"));
   return box;
 }
 function decision(round) {
