@@ -26,18 +26,9 @@
 .comparison-gridline{stroke:#e0e7df;stroke-width:1}
 .comparison-axis{fill:#78877c;font:12px Consolas,monospace}
 .comparison-tick{stroke:#a2b0a4;stroke-width:1}
-.equity-line{fill:none;stroke-width:3;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}
+.equity-line{fill:none;stroke-width:2.25;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}
 .equity-line.claude{stroke:#477c5d}
 .equity-line.codex{stroke:#397e9a}
-.equity-sample{fill:#fffefa;stroke-width:2.5;vector-effect:non-scaling-stroke}
-.equity-sample.claude{stroke:#477c5d}
-.equity-sample.codex{stroke:#397e9a}
-.equity-round{fill:#fffefa;stroke-width:2.5;vector-effect:non-scaling-stroke}
-.equity-round.claude{stroke:#477c5d}
-.equity-round.codex{stroke:#397e9a}
-.equity-latest{stroke:#fffefa;stroke-width:2.5;vector-effect:non-scaling-stroke}
-.equity-latest.claude{fill:#477c5d}
-.equity-latest.codex{fill:#397e9a}
 .equity-end-label line{stroke-width:1.5;vector-effect:non-scaling-stroke}
 .equity-end-label rect{stroke:#fffefa;stroke-width:1}
 .equity-end-label text{font:600 12px "Segoe UI","Microsoft YaHei UI",sans-serif;fill:#fffefa}
