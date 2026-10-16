@@ -12,9 +12,10 @@ import tempfile
 from pathlib import Path
 
 from ai_portfolios.common import APP, ROOT, digest, read, stamp, write
+from ai_portfolios.execution import MIN_TRADE_FRACTION
 
 ENGINE_ID = "codex_engine"
-VERSION = "3.0.0-opening-participation-feedback"
+VERSION = "3.1.0-marked-holdings-baseline"
 EFFORT = "medium"
 
 INVALIDATION = {"type": "object", "additionalProperties": False, "properties": {
@@ -66,6 +67,65 @@ def _squeeze(value):
 
 def _finite(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _actual_marked_baseline(previous):
+    """Derive marked weights and no-op tolerances from the account snapshot."""
+    holdings = previous.get("holdings", {})
+    if not isinstance(holdings, dict):
+        raise ValueError("current account holdings must be an object")
+    if not holdings:
+        return {}, {}
+
+    cash = previous.get("cash")
+    if not _finite(cash) or cash < 0:
+        raise ValueError("cannot derive current holding weights without valid account cash")
+
+    market_values = {}
+    equity = cash
+    for symbol, holding in holdings.items():
+        if not isinstance(symbol, str) or not symbol or not isinstance(holding, dict):
+            raise ValueError("current account holding is malformed")
+        shares = holding.get("shares")
+        mark = holding.get("last_mark")
+        if not _finite(shares) or shares < 0:
+            raise ValueError(f"{symbol}: current account shares are invalid")
+        if shares == 0:
+            market_values[symbol] = 0.0
+            continue
+        if not _finite(mark) or mark <= 0:
+            raise ValueError(f"{symbol}: current account mark is invalid")
+        value = shares * mark
+        if not _finite(value):
+            raise ValueError(f"{symbol}: current marked value is invalid")
+        market_values[symbol] = value
+        equity += value
+
+    if not _finite(equity) or equity <= 0:
+        raise ValueError("cannot derive current holding weights from non-positive marked equity")
+    weights = {symbol: value / equity for symbol, value in market_values.items() if value > 0}
+    # Paper execution places whole-share orders and suppresses changes below 0.5%
+    # of equity. A first-round hold may therefore differ slightly from its marked
+    # weight without producing an executable order.
+    tolerances = {symbol: max(MIN_TRADE_FRACTION, holdings[symbol]["last_mark"] / equity)
+                  for symbol, value in market_values.items() if value > 0}
+    return weights, tolerances
+
+
+def _prior_target_weights(last_decision):
+    if last_decision is None:
+        return {}
+    if not isinstance(last_decision, dict) or not isinstance(last_decision.get("positions"), list):
+        raise ValueError("prior decision has an invalid positions list")
+    result = {}
+    for position in last_decision["positions"]:
+        if not isinstance(position, dict):
+            raise ValueError("prior decision contains a malformed position")
+        symbol, weight = position.get("symbol"), position.get("target_weight")
+        if not isinstance(symbol, str) or not symbol or symbol in result or not _finite(weight) or not 0 <= weight <= 1:
+            raise ValueError("prior decision contains an invalid or duplicate target weight")
+        result[symbol] = weight
+    return result
 
 
 def _cli(name):
@@ -164,6 +224,8 @@ def validate(decision, config, packet, previous):
         raise ValueError("positions must be a list")
     symbols, invested = set(), 0.0
     old_holdings = previous.get("holdings", {})
+    actual_weights, actual_weight_tolerances = _actual_marked_baseline(previous)
+    prior_weights = _prior_target_weights(previous.get("last_decision"))
     for pos in positions:
         symbol = pos.get("symbol")
         if symbol not in config["universe"] or symbol in symbols:
@@ -174,12 +236,18 @@ def validate(decision, config, packet, previous):
             raise ValueError(f"{symbol}: target weight outside allowed range")
         if pos["action"] in {"exit", "watch"} and weight != 0 or pos["action"] not in {"exit", "watch"} and weight <= 0:
             raise ValueError(f"{symbol}: action and target weight disagree")
-        old_weight = old_holdings.get(symbol, {}).get("target_weight", 0.0)
+        prior_weight = prior_weights.get(symbol, 0.0)
+        # Same-experiment target weights are the comparison baseline. On a new
+        # experiment's first round, use the observed account's marked allocation.
+        old_weight = prior_weight if prior_weight > 0 else actual_weights.get(symbol, 0.0)
         if pos["action"] == "new" and old_weight > 0 or pos["action"] == "add" and (old_weight <= 0 or weight <= old_weight):
             raise ValueError(f"{symbol}: action conflicts with prior holdings")
-        if pos["action"] == "trim" and (old_weight <= 0 or weight >= old_weight) or \
-                pos["action"] == "hold" and old_weight > 0 and abs(weight - old_weight) > 1e-9:
+        if pos["action"] == "trim" and (old_weight <= 0 or weight >= old_weight):
             raise ValueError(f"{symbol}: action conflicts with prior target weight")
+        if pos["action"] == "hold":
+            tolerance = 1e-9 if prior_weight > 0 else actual_weight_tolerances.get(symbol, 0.0)
+            if old_weight <= 0 or abs(weight - old_weight) >= tolerance:
+                raise ValueError(f"{symbol}: action conflicts with prior target weight")
         if not isinstance(pos.get("horizon_days"), int) or isinstance(pos["horizon_days"], bool) or not 1 <= pos["horizon_days"] <= 365:
             raise ValueError(f"{symbol}: invalid review horizon")
         confidence = pos.get("confidence")
