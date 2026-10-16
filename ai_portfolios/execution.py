@@ -13,9 +13,13 @@ Deliberate limits for this first version:
 - client_order_id is derived from (round, provider, symbol, side), so running the same plan twice
   cannot place a second order: the broker rejects the duplicate id. One round places at most one
   order per symbol per side however many times it is run.
-- Limit orders, DAY, whole shares. A market order would hand us an unbounded price; a limit priced
-  off the current quote caps it and simply expires unfilled if the market moves away, which the next
-  round sees as the real position and re-plans from.
+- Limit orders, DAY, fractional quantities. A market order would hand us an unbounded price; a limit
+  priced off the current quote caps it and simply expires unfilled if the market moves away, which
+  the next round sees as the real position and re-plans from. Every symbol in the universe reports
+  fractionable=true and Alpaca accepts fractional qty on limit DAY orders to nine decimals, so a
+  target weight is realised as asked rather than truncated to a share count.
+- A quote that cannot support an order costs its own leg, not the book. One unusable quote used to
+  raise out of plan() and reject the whole round, so one slow name took nine good orders with it.
 - Risk-reducing legs (sells) are submitted even when the risk-increasing legs (buys) cannot be
   afforded yet. Cash from a sell is not available until it fills, so buys that exceed settled cash
   are deferred and recorded, never silently shrunk: shrinking a weight would change the model's
@@ -25,7 +29,6 @@ Deliberate limits for this first version:
 """
 from __future__ import annotations
 
-import math
 import time as wait
 from datetime import timedelta
 from pathlib import Path
@@ -38,6 +41,11 @@ from .paper_accounts import BASE, number, read_one
 
 LIMIT_BUFFER = 0.002        # assumption: 20bp past the touch. Caps the price without chasing.
 MIN_TRADE_FRACTION = 0.005  # assumption: skip rebalances below 0.5% of equity, so drift is not churn.
+# Alpaca accepts fractional qty to nine decimals on limit DAY orders, and every symbol in the
+# universe reports fractionable=true. Truncating to whole shares was this executor overriding the
+# decision it was given: on a $10k book one MSFT share is 5.5% and one LLY share is 11.8%, so
+# whole-share rounding skipped eight of ten legs and left a 22-point hole in the intended book.
+QTY_PRECISION = 9
 MAX_QUOTE_AGE_SECONDS = 120
 MAX_PRICE_DEVIATION = 0.2   # Refuse a quote this far from the packet's last close: gapped or bad.
 # Quote timestamps are stamped by Alpaca and belong to Alpaca's clock, not to this machine. Judging a
@@ -175,13 +183,22 @@ def plan(decision, account, positions, quote_map, closes, config, at, tradable=T
         raise ValueError("单股目标权重超过上限，已拒绝整份计划")
     if sum(1 for weight in targets.values() if weight > 0) > config["max_positions"]:
         raise ValueError("正仓位数量超过上限，已拒绝整份计划")
-    legs, skipped = [], []
+    legs, skipped, unpriced = [], [], 0
     for symbol in sorted(actionable(decision, positions)):
         if tradable:
-            if symbol not in quote_map:
-                raise ValueError(f"缺少报价的标的：{symbol}；整份计划暂不执行")
-            metrics = quote_metrics(symbol, quote_map[symbol], closes.get(symbol), at,
-                                    config.get("max_quote_age_seconds", MAX_QUOTE_AGE_SECONDS))
+            # One symbol whose quote cannot support an order is that symbol's problem. Raising here
+            # rejected the entire round, so a single stale name - IEX runs seconds behind on the
+            # thinner ones - cost every other leg with it. Skipped and recorded, the rest proceed.
+            try:
+                if symbol not in quote_map:
+                    raise ValueError(f"{symbol} 本轮没有报价，跳过这一腿")
+                metrics = quote_metrics(symbol, quote_map[symbol], closes.get(symbol), at,
+                                        config.get("max_quote_age_seconds", MAX_QUOTE_AGE_SECONDS))
+            except ValueError as exc:
+                unpriced += 1
+                skipped.append({"symbol": symbol, "reason": str(exc)[:160],
+                                "delta_value": None, "target_weight": targets.get(symbol, 0.0)})
+                continue
         else:
             close = closes.get(symbol)
             if not close:
@@ -193,20 +210,32 @@ def plan(decision, account, positions, quote_map, closes, config, at, tradable=T
         side = "buy" if delta_value > 0 else "sell"
         # The buffer crosses a real touch. An indicative plan has no touch to cross, so it shows the close.
         limit_price = limit_for(side, metrics) if tradable else round(metrics["mid"], 2)
-        quantity = math.floor(abs(delta_value) / limit_price)
-        if side == "sell":
-            quantity = min(quantity, math.floor(current_qty))
         # A full exit is never dust: the model said the thesis is dead, and the size of the
         # position does not change that. The minimum only suppresses rebalancing drift.
         exiting = targets.get(symbol, 0.0) == 0 and current_qty > 0
-        if quantity < 1 or (not exiting and abs(delta_value) < equity * MIN_TRADE_FRACTION):
-            skipped.append({"symbol": symbol, "reason": "不足一股，无法下单" if quantity < 1 else
+        if exiting:
+            # Sell the position itself, not a value divided by a price: mid values the holding and
+            # the touch prices the order, so dividing leaves a crumb and a crumb keeps a name the
+            # model has closed sitting in the book.
+            quantity = round(current_qty, QTY_PRECISION)
+        else:
+            quantity = round(abs(delta_value) / limit_price, QTY_PRECISION)
+            if side == "sell":
+                quantity = min(quantity, round(current_qty, QTY_PRECISION))
+        if quantity <= 0 or (not exiting and abs(delta_value) < equity * MIN_TRADE_FRACTION):
+            skipped.append({"symbol": symbol, "reason": "没有可下单的数量" if quantity <= 0 else
                             "低于最小调整额，视为漂移而非决定",
                             "delta_value": round(delta_value, 2), "target_weight": targets.get(symbol, 0.0)})
             continue
         legs.append({"symbol": symbol, "side": side, "qty": quantity, "limit_price": limit_price,
                      "notional": round(quantity * limit_price, 2), "target_weight": targets.get(symbol, 0.0),
                      "current_qty": current_qty, **{k: metrics[k] for k in ("bid", "ask", "quote_age_seconds")}})
+    # Skipping a leg answers a problem with one name. Every name failing is a different claim: the
+    # feed or the packet is wrong, and placing no orders is the correct answer to that, not placing
+    # the handful that happened to pass.
+    if tradable and unpriced and not legs:
+        raise ValueError("本轮全部标的都没有可用报价，拒绝执行：" +
+                         "；".join(row["reason"] for row in skipped[:4]))
     sells = [leg for leg in legs if leg["side"] == "sell"]
     buys = [leg for leg in legs if leg["side"] == "buy"]
     # Sell proceeds are not settled cash yet, so buys are measured against cash on hand only.
