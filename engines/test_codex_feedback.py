@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from ai_portfolios.common import write
-from engines import codex_engine as codex
+from engines import codex_engine as codex, research
 
 
 def config(**overrides):
@@ -49,6 +49,76 @@ def test_codex_rejects_below_floor(weights):
 @pytest.mark.parametrize("weights", [(.3, .2), (.3, .3, .3)])
 def test_codex_accepts_exact_limits(weights):
     assert codex.validate(decision(weights), config(), packet(), {"holdings": {}})
+
+
+def test_codex_can_add_to_existing_paper_holding_without_prior_target_weight():
+    plan = decision((.25, .15, .15))
+    plan["positions"][0]["action"] = "add"
+    previous = {"cash": 800, "holdings": {"AAA": {"shares": 2, "last_mark": 100}}, "last_decision": None}
+
+    assert codex.validate(plan, config(), packet(), previous)
+
+
+def test_codex_rejects_add_that_does_not_exceed_actual_starting_weight():
+    plan = decision((.20, .15, .15))
+    plan["positions"][0]["action"] = "add"
+    previous = {"cash": 800, "holdings": {"AAA": {"shares": 2, "last_mark": 100}}, "last_decision": None}
+
+    with pytest.raises(ValueError, match="action conflicts with prior"):
+        codex.validate(plan, config(), packet(), previous)
+
+
+def test_codex_does_not_call_an_existing_holding_new():
+    previous = {"cash": 800, "holdings": {"AAA": {"shares": 2, "last_mark": 100}}, "last_decision": None}
+
+    with pytest.raises(ValueError, match="action conflicts with prior"):
+        codex.validate(decision(), config(), packet(), previous)
+
+
+def test_codex_can_trim_existing_paper_holding_without_prior_target_weight():
+    plan = decision((.15, .20, .20))
+    plan["positions"][0]["action"] = "trim"
+    previous = {"cash": 800, "holdings": {"AAA": {"shares": 2, "last_mark": 100}}, "last_decision": None}
+
+    assert codex.validate(plan, config(), packet(), previous)
+
+
+def test_codex_hold_must_match_the_first_round_marked_weight():
+    plan = decision((.002, .25, .25))
+    plan["positions"][0]["action"] = "hold"
+    previous = {"cash": 99800, "holdings": {"AAA": {"shares": 2, "last_mark": 100}}, "last_decision": None}
+
+    assert codex.validate(plan, config(), packet(), previous)
+    plan["positions"][0]["target_weight"] = .01
+    with pytest.raises(ValueError, match="action conflicts with prior target weight"):
+        codex.validate(plan, config(), packet(), previous)
+
+
+def test_codex_uses_same_experiment_target_weight_when_available():
+    plan = decision((.18, .20, .20))
+    plan["positions"][0]["action"] = "add"
+    previous = {"cash": 850, "holdings": {"AAA": {"shares": 3, "last_mark": 50}},
+                "last_decision": {"positions": [{"symbol": "AAA", "target_weight": .20}]}}
+
+    with pytest.raises(ValueError, match="action conflicts with prior"):
+        codex.validate(plan, config(), packet(), previous)
+
+    plan["positions"][0]["target_weight"] = .22
+    assert codex.validate(plan, config(), packet(), previous)
+
+
+def test_codex_requires_complete_account_data_to_derive_first_round_baseline():
+    previous = {"holdings": {"AAA": {"shares": 2, "last_mark": 100}}, "last_decision": None}
+
+    with pytest.raises(ValueError, match="valid account cash"):
+        codex.validate(decision((.25, .15, .15)), config(), packet(), previous)
+
+
+def test_holdings_baseline_change_starts_a_new_experiment_identity():
+    old_engine = SimpleNamespace(engine_id="codex_engine", version="3.0.0-opening-participation-feedback",
+                                 instruction=codex.ENGINE.instruction)
+
+    assert research.identity(codex.ENGINE, config(), "mandate") != research.identity(old_engine, config(), "mandate")
 
 
 @pytest.mark.parametrize("overrides", [{"min_invested": True}, {"min_invested": float("nan")},
