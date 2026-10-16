@@ -23,13 +23,27 @@ def decision(positions=(("MSFT", 0.15),)):
             "injection_flags": [], "positions": [{"symbol": s, "target_weight": w} for s, w in positions]}
 
 
-def test_plan_converts_weights_to_whole_share_limit_orders():
+def test_plan_converts_weights_to_fractional_limit_orders():
+    """Every symbol in the universe is fractionable and Alpaca fills fractional qty on limit DAY
+    orders, so a weight arrives as asked. Truncating to 14 shares was this executor quietly
+    choosing a smaller position than the one the decision specified."""
     proposal = execution.plan(decision(), account(), [], {"MSFT": quote()}, {"MSFT": 100.0}, CONFIG, TIME)
     leg = proposal["orders"][0]
     assert leg["side"] == "buy" and leg["symbol"] == "MSFT"
-    # 15% of 10,000 = 1,500 at a 100.30 limit -> 14 whole shares, never 14.95
-    assert leg["qty"] == 14 and leg["limit_price"] == pytest.approx(100.3)
-    assert float(leg["qty"]) == int(leg["qty"])
+    # 15% of 10,000 = 1,500 at a 100.30 limit -> 14.955..., not 14
+    assert leg["limit_price"] == pytest.approx(100.3)
+    assert leg["qty"] == pytest.approx(1500 / 100.3, rel=1e-9)
+    assert leg["qty"] == round(leg["qty"], execution.QTY_PRECISION)
+    assert leg["notional"] == pytest.approx(1500, abs=0.01)
+
+
+def test_an_exit_sells_the_exact_fractional_position():
+    """Dividing a mid-valued delta by a touch price leaves a crumb, and a crumb keeps a name the
+    model has closed sitting in the book."""
+    positions = [{"symbol": "MSFT", "qty": "2.345678912"}]
+    proposal = execution.plan(decision(positions=(("MSFT", 0.0),)), account(), positions,
+                              {"MSFT": quote()}, {"MSFT": 100.0}, CONFIG, TIME)
+    assert proposal["orders"][0]["qty"] == 2.345678912
 
 
 def test_limit_price_sits_past_the_touch_on_each_side():
@@ -63,10 +77,55 @@ def test_a_tiny_rebalance_is_still_treated_as_drift():
     assert proposal["orders"] == [] and "漂移" in proposal["skipped"][0]["reason"]
 
 
-def test_a_position_too_small_for_one_share_is_reported_separately():
+def test_a_position_too_small_to_be_worth_its_spread_is_still_skipped():
+    """Fractional shares remove the granularity floor, not the cost floor: 0.05% of equity is $5,
+    and $5 of anything pays a full spread for a position that cannot matter."""
     proposal = execution.plan(decision(positions=(("MSFT", 0.0005),)), account(), [],
                               {"MSFT": quote()}, {"MSFT": 100.0}, CONFIG, TIME)
-    assert proposal["orders"] == [] and "不足一股" in proposal["skipped"][0]["reason"]
+    assert proposal["orders"] == [] and "漂移" in proposal["skipped"][0]["reason"]
+
+
+def test_one_stale_quote_costs_its_own_leg_and_not_the_book():
+    """Measured on the IEX feed mid-session: median quote age 1.1s, worst 24.5s on CRM, against a
+    120s ceiling. The margin is real but thinnest at the open, and an unusable quote used to raise
+    out of plan() and reject the whole round - one slow name taking every good leg with it.
+    """
+    quotes = {"MSFT": quote(), "AAPL": quote(at=TIME - timedelta(seconds=600)), "NVDA": quote()}
+    closes = {"MSFT": 100.0, "AAPL": 100.0, "NVDA": 100.0}
+    proposal = execution.plan(decision(positions=(("MSFT", 0.1), ("AAPL", 0.1), ("NVDA", 0.1))),
+                              account(), [], quotes, closes, CONFIG, TIME)
+    assert sorted(leg["symbol"] for leg in proposal["orders"]) == ["MSFT", "NVDA"]
+    stale = [row for row in proposal["skipped"] if row["symbol"] == "AAPL"]
+    assert len(stale) == 1 and "过期" in stale[0]["reason"]
+
+
+def test_a_symbol_with_no_quote_at_all_also_only_costs_its_own_leg():
+    proposal = execution.plan(decision(positions=(("MSFT", 0.1), ("AAPL", 0.1))), account(), [],
+                              {"MSFT": quote()}, {"MSFT": 100.0, "AAPL": 100.0}, CONFIG, TIME)
+    assert [leg["symbol"] for leg in proposal["orders"]] == ["MSFT"]
+    assert [row["symbol"] for row in proposal["skipped"]] == ["AAPL"]
+
+
+def test_every_symbol_unpriced_is_a_feed_problem_and_still_stops_the_round():
+    """Skipping a leg answers a problem with one name. Every name failing is a different claim -
+    the feed or the packet is wrong - and placing nothing is the right answer to that."""
+    old = {symbol: quote(at=TIME - timedelta(seconds=600)) for symbol in ("MSFT", "AAPL")}
+    with pytest.raises(ValueError, match="全部标的都没有可用报价"):
+        execution.plan(decision(positions=(("MSFT", 0.1), ("AAPL", 0.1))), account(), [],
+                       old, {"MSFT": 100.0, "AAPL": 100.0}, CONFIG, TIME)
+
+
+def test_a_stale_quote_on_an_exit_is_reported_rather_than_forced():
+    """A skipped exit leaves a position the model wanted out of, which is the one case where this
+    change is not strictly safer. There is nothing better to do - an order needs a price - so it
+    has to be visible in skipped rather than silently absent."""
+    positions = [{"symbol": "MSFT", "qty": "4"}, {"symbol": "NVDA", "qty": "2"}]
+    quotes = {"MSFT": quote(at=TIME - timedelta(seconds=600)), "NVDA": quote()}
+    proposal = execution.plan(decision(positions=(("MSFT", 0.0), ("NVDA", 0.1))), account(),
+                              positions, quotes, {"MSFT": 100.0, "NVDA": 100.0}, CONFIG, TIME)
+    assert [row["symbol"] for row in proposal["skipped"]] == ["MSFT"]
+    assert "过期" in proposal["skipped"][0]["reason"]
+    assert [leg["symbol"] for leg in proposal["orders"]] == ["NVDA"]
 
 
 def test_short_position_in_the_account_stops_everything():
