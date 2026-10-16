@@ -282,7 +282,11 @@ def execute(provider, round_directory, config, submit_orders=False, getter=None,
     account_directory = execution_root / f"account_{mode}_{at.strftime('%Y%m%dT%H%M%S%fZ')}"
     snapshot = read_one(provider, credentials, account_directory, getter=getter)
     if snapshot["status"] != "connected":
-        raise ValueError("执行前账户读取不完整，拒绝提交")
+        # The leading sentence is kept word for word: the shared page renders this string verbatim.
+        # What follows is the detail that used to be dropped - read_one knows whether it was a 500, a
+        # timeout or a malformed body, and on 2026-10-16 all that survived the raise was "incomplete".
+        detail = "；".join(f"{row['source']}: {row['error']}" for row in snapshot.get("errors", []))
+        raise ValueError("执行前账户读取不完整，拒绝提交" + (f"（{detail}）" if detail else ""))
     binding_path = round_directory.parents[1] / "account_binding.json"
     if not binding_path.exists() or read(binding_path).get("account_id") != snapshot["account"].get("id"):
         raise ValueError(f"{provider} 的账户身份与该团队绑定不符，拒绝提交")

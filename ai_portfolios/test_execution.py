@@ -323,6 +323,21 @@ def test_a_watch_idea_with_no_position_is_a_no_op_and_is_never_quoted(round_dir)
     assert [leg["symbol"] for leg in record["plan"]["orders"]] == ["MSFT"]
 
 
+def test_an_unreadable_account_refusal_names_the_cause(round_dir, monkeypatch):
+    """The shared page renders execution_error verbatim, so the leading sentence is unchanged and the
+    cause is appended. On 2026-10-16 the whole record of a lost trading day was the word
+    "incomplete"; read_one had the HTTP status all along and the raise threw it away."""
+    monkeypatch.setattr(execution, "read_one", lambda *a, **k: {
+        "status": "unavailable", "account": {}, "positions": [], "orders": [],
+        "errors": [{"source": "account", "error": "Alpaca Paper HTTP 500", "attempts": 3}]})
+    with pytest.raises(ValueError) as caught:
+        execution.execute("claude", round_dir, CONFIG, submit_orders=True,
+                          getter=getter_for(), at=TIME)
+    message = str(caught.value)
+    assert message.startswith("执行前账户读取不完整，拒绝提交")
+    assert "account: Alpaca Paper HTTP 500" in message
+
+
 def test_execution_never_calls_a_cancel_or_close_endpoint(round_dir):
     seen = []
 
