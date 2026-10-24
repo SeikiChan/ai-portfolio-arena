@@ -208,13 +208,106 @@ def test_compact_snapshot_timestamp_parser_keeps_fractional_seconds():
     assert parsed == datetime(2026, 10, 15, 13, 35, 18, 291686, tzinfo=timezone.utc)
 
 
-def test_unavailable_broker_history_does_not_fabricate_a_series(monkeypatch):
+MARKS = [{"at": "20261010T000000Z", "experiment_id": "exp"}]
+
+
+def no_backoff(monkeypatch):
+    from ai_portfolios import paper_accounts
+    monkeypatch.setattr(paper_accounts.wait, "sleep", lambda seconds: None)
     monkeypatch.setattr(publish, "paper_credentials", lambda *, only: {only: ("PAPER_KEY", "PAPER_SECRET")})
+
+
+def series(points=2):
+    from datetime import datetime, timedelta, timezone
+    base = datetime.now(timezone.utc) - timedelta(days=1)
+
+    class Response:
+        status_code = 200
+        def json(self):
+            return {"timestamp": [int((base + timedelta(hours=i)).timestamp()) for i in range(points)],
+                    "equity": ["10000.00"] * points}
+    return Response()
+
+
+def test_unavailable_broker_history_does_not_fabricate_a_series(monkeypatch):
+    no_backoff(monkeypatch)
+    calls = []
     def timeout(*args, **kwargs):
+        calls.append(1)
         raise publish.requests.Timeout()
-    result = publish.portfolio_history("claude_engine", [{"at": "20261010T000000Z", "experiment_id": "exp"}], getter=timeout)
+    result = publish.portfolio_history("claude_engine", MARKS, getter=timeout)
     assert result["status"] == "unavailable" and result["reason"] == "Timeout"
     assert result["points"] == []
+    # A persistent failure is still a failure, but it is allowed its attempts first.
+    assert len(calls) == result["attempts"] > 1
+
+
+def test_a_single_timeout_no_longer_erases_the_whole_curve(monkeypatch):
+    """2026-10-23: this call timed out once, the shared page read "暂无数据" for the rest of the day,
+    and the endpoint answered in 1.6-2.1s with 567 points every time it was checked afterwards. The
+    10s budget was never the problem; there was simply no second attempt."""
+    no_backoff(monkeypatch)
+    calls = []
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise publish.requests.ReadTimeout()
+        return series()
+    result = publish.portfolio_history("claude_engine", MARKS, getter=flaky)
+    assert result["status"] == "available" and len(result["points"]) == 2
+    assert len(calls) == 2
+
+
+def test_a_truncated_series_is_retried_like_a_network_error(monkeypatch):
+    # Two lists of unequal length is an unusable body, and the next answer may be whole.
+    no_backoff(monkeypatch)
+    calls = []
+    class Half:
+        status_code = 200
+        def json(self):
+            return {"timestamp": [1, 2, 3], "equity": ["10000.00"]}
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        return Half() if len(calls) == 1 else series()
+    result = publish.portfolio_history("claude_engine", MARKS, getter=flaky)
+    assert result["status"] == "available" and len(calls) == 2
+
+
+def test_an_unusable_body_that_never_recovers_is_reported_not_fabricated(monkeypatch):
+    no_backoff(monkeypatch)
+    class Half:
+        status_code = 200
+        def json(self):
+            return {"timestamp": [1, 2, 3], "equity": ["10000.00"]}
+    result = publish.portfolio_history("claude_engine", MARKS, getter=lambda *a, **k: Half())
+    assert result["status"] == "unavailable" and result["points"] == []
+
+
+def test_bad_credentials_are_answered_once_rather_than_hammered(monkeypatch):
+    """401 is not transient. Repeating it spends a rate limit to learn nothing."""
+    no_backoff(monkeypatch)
+    calls = []
+    class Denied:
+        status_code = 401
+        def json(self):
+            return {}
+    def denied(*args, **kwargs):
+        calls.append(1)
+        return Denied()
+    result = publish.portfolio_history("claude_engine", MARKS, getter=denied)
+    assert result["status"] == "unavailable" and "401" in result["reason"]
+    assert len(calls) == 1
+
+
+def test_the_page_only_ever_sees_status_and_points(monkeypatch):
+    """shared_static/app.js reads portfolio_history.status and .points and nothing else, so the
+    reason wording is free to change while those two must keep their shape."""
+    no_backoff(monkeypatch)
+    good = publish.portfolio_history("claude_engine", MARKS, getter=lambda *a, **k: series())
+    bad = publish.portfolio_history("claude_engine", MARKS,
+                                    getter=lambda *a, **k: (_ for _ in ()).throw(publish.requests.Timeout()))
+    assert good["status"] == "available" and isinstance(good["points"], list)
+    assert bad["status"] == "unavailable" and bad["points"] == []
 
 
 def test_research_trace_excludes_model_input_and_bounds_tool_excerpt(tmp_path):
