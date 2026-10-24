@@ -23,7 +23,7 @@ import requests
 
 from ai_portfolios.common import ROOT, parse_time, read, stamp, write
 from ai_portfolios.credentials import paper_credentials
-from ai_portfolios.paper_accounts import BASE
+from ai_portfolios.paper_accounts import BASE, fetch_endpoint
 
 from . import contract
 
@@ -106,6 +106,16 @@ def _utc_datetime(value):
     return parse_time(value).astimezone(timezone.utc)
 
 
+def _series_shape(payload):
+    """The equity series is only usable as two lists of equal length, so the shape is checked
+    inside the retry: a truncated body is worth one more attempt for the same reason a 503 is."""
+    if not isinstance(payload, dict):
+        return False
+    timestamps, equities = payload.get("timestamp"), payload.get("equity")
+    return (isinstance(timestamps, list) and isinstance(equities, list)
+            and len(timestamps) == len(equities))
+
+
 def portfolio_history(engine_id, marks, getter=None):
     """Fetch one team's bounded, sanitized Paper equity series for the read-only dashboard."""
     provider = ENGINE_PROVIDER.get(engine_id)
@@ -128,26 +138,23 @@ def portfolio_history(engine_id, marks, getter=None):
     params = {"start": start.isoformat().replace("+00:00", "Z"),
               "end": now_utc.isoformat().replace("+00:00", "Z"),
               "timeframe": "15Min", "intraday_reporting": "market_hours", "pnl_reset": "no_reset"}
+    # One ReadTimeout used to erase the whole curve: on 2026-10-23 this call failed once, the page
+    # read "暂无数据" for the rest of the day, and the endpoint answered in 1.6-2.1s when checked
+    # afterwards. The 10s budget was never the problem, the absent retry was. fetch_endpoint already
+    # carries the bounded one written for read_one: three attempts, linear backoff, retrying network
+    # errors, 408/425/429, 5xx and a body that will not parse, and answering a 401 once because bad
+    # credentials are not transient.
     try:
         key, secret = paper_credentials(only=provider)[provider]
-        response = (getter or requests.get)(BASE + "/v2/account/portfolio/history",
-                                            headers={"APCA-API-KEY-ID": key,
-                                                     "APCA-API-SECRET-KEY": secret},
-                                            params=params, timeout=10, allow_redirects=False)
-        if response.status_code != 200:
-            return {"status": "unavailable", "reason": f"Alpaca Paper HTTP {response.status_code}",
-                    "timeframe": "15Min", "points": []}
-        payload = response.json()
-    except (requests.RequestException, OSError, ValueError, KeyError, TypeError) as exc:
+    except (ValueError, KeyError, TypeError, OSError) as exc:
         return {"status": "unavailable", "reason": type(exc).__name__, "timeframe": "15Min", "points": []}
-
-    if not isinstance(payload, dict):
-        return {"status": "unavailable", "reason": "Alpaca 返回的时间序列格式无效",
+    payload, problem, attempts = fetch_endpoint(
+        getter or requests.get, BASE + "/v2/account/portfolio/history", params,
+        {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}, _series_shape)
+    if problem is not None:
+        return {"status": "unavailable", "reason": problem, "attempts": attempts,
                 "timeframe": "15Min", "points": []}
-    timestamps, equities = payload.get("timestamp"), payload.get("equity")
-    if not isinstance(timestamps, list) or not isinstance(equities, list) or len(timestamps) != len(equities):
-        return {"status": "unavailable", "reason": "Alpaca 返回的时间序列格式无效",
-                "timeframe": "15Min", "points": []}
+    timestamps, equities = payload["timestamp"], payload["equity"]
     parsed_points, invalid_rows = [], 0
     for raw_at, raw_equity in zip(timestamps, equities):
         try:
